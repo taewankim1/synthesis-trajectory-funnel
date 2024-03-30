@@ -1,33 +1,9 @@
-
 include("../trajopt/dynamics.jl")
 include("../trajopt/discretize.jl")
-include("funl_dynamics.jl")
+include("joint_dynamics.jl")
 using LinearAlgebra
 
-function get_radius_angle_Ellipse2D(Q_list)
-    radius_list = []
-    angle_list = []
-
-    for i in 1:size(Q_list,3)
-        Q_ = Q_list[:,:,i]
-        eigval = eigvals(inv(Q_))
-        radius = sqrt.(1 ./ eigval)
-        # println("radius of x,y,theta: ", radius)
-        A = [1 0 0; 0 1 0]
-        Q_proj = A * Q_ * A'
-        Q_inv = inv(Q_proj)
-        eigval, eigvec = eigen(Q_inv)
-        radius = sqrt.(1 ./ eigval)
-        # println("radius of x and y: ", radius)
-        rnew = eigvec * [radius[1]; 0]
-        angle = atan(rnew[2], rnew[1])
-        push!(radius_list, radius)
-        push!(angle_list, angle)
-    end
-    return radius_list, angle_list
-end
-
-function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
+function propagate_multiple_FOH(model::JointDynamics,dynamics::Dynamics,
     x::Matrix,u::Matrix,T::Vector,
     Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3})
     N = size(x,2) - 1
@@ -60,9 +36,8 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
 
         # traj terms
         f = forward(dynamics,x_,u_)
-        A,B = diff(dynamics,x_,u_)
         # funl terms
-        F = forward(model,q_,y_,z_,A,B)
+        F = forward(model,dynamics,q_,y_,z_,x_,u_)
 
         dxdt = f
         dqdt = F
@@ -75,6 +50,8 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     uprop = []
     qprop = []
     yprop = []
+    xfwd = zeros(size(x))
+    xfwd[:,1] .= x[:,1]
     Qfwd = zeros(size(Q))
     Qfwd[:,:,1] = Q[:,:,1]
     for i = 1:N
@@ -89,7 +66,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         dt = T[i]
 
         prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt))
-        sol = solve(prob, Tsit5(), reltol=1e-6, abstol=1e-6;verbose=false);
+        sol = solve(prob, Tsit5(), reltol=1e-8, abstol=1e-8;verbose=false);
 
         tode = sol.t
         uode = zeros(iu,size(tode,1))
@@ -116,6 +93,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
             qprop = hcat(qprop,qode)
             yprop = hcat(yprop,yode)
         end
+        xfwd[:,i+1] .= xode[:,end]
         Qfwd[:,:,i+1] = reshape(qode[:,end],(ix,ix))
     end
     Qprop = zeros(ix,ix,length(tprop))
@@ -124,27 +102,5 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         Qprop[:,:,i] .= reshape(qprop[:,i],(ix,ix))
         Yprop[:,:,i] .= reshape(yprop[:,i],(iu,Int64(iy/iu)))
     end
-    return Qfwd,tprop,xprop,uprop,Qprop,Yprop
+    return xfwd,Qfwd,tprop,xprop,uprop,Qprop,Yprop
 end
-
-
-# def get_radius_angle(Q_list) :
-#     radius_list = []
-#     angle_list = []
-#     for Q_ in Q_list :
-#         eig,_ = np.linalg.eig(np.linalg.inv(Q_))
-#         radius = np.sqrt(1/eig)
-#         # print("radius of x,y,theta",radius)
-#         A = np.array([[1,0,0],[0,1,0]])
-#         # Q_proj = project_ellipse(Q_) 
-#         Q_proj = A@Q_@A.T
-#         Q_inv = np.linalg.inv(Q_proj)
-#         eig,eig_vec = np.linalg.eig(Q_inv)
-#         radius = np.sqrt(1/eig)
-#         # print("radius of x and y",radius)
-#         rnew = eig_vec@np.array([[radius[0]],[0]])
-#         angle = np.arctan2(rnew[1],rnew[0])
-#         radius_list.append(radius)
-#         angle_list.append(angle)
-
-#     return radius_list,angle_list

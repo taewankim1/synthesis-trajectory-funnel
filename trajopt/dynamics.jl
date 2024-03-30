@@ -58,6 +58,78 @@ function diff(model::Unicycle, x::Vector, u::Vector)
     return fx, fu
 end
 
+function diff2(model::Unicycle, x::Vector, u::Vector)
+    x1 = x[1]
+    x2 = x[2]
+    x3 = x[3]
+    
+    u1 = u[1]
+    u2 = u[2]
+
+    fxx = zeros(model.ix,model.ix,model.ix)
+    fxx[1,1,1] = 0
+    fxx[1,1,2] = 0
+    fxx[1,1,3] = 0
+    fxx[1,2,1] = 0
+    fxx[1,2,2] = 0
+    fxx[1,2,3] = 0
+    fxx[1,3,1] = 0
+    fxx[1,3,2] = 0
+    fxx[1,3,3] = -u1*cos(x3)
+    fxx[2,1,1] = 0
+    fxx[2,1,2] = 0
+    fxx[2,1,3] = 0
+    fxx[2,2,1] = 0
+    fxx[2,2,2] = 0
+    fxx[2,2,3] = 0
+    fxx[2,3,1] = 0
+    fxx[2,3,2] = 0
+    fxx[2,3,3] = -u1*sin(x3)
+    fxx[3,1,1] = 0
+    fxx[3,1,2] = 0
+    fxx[3,1,3] = 0
+    fxx[3,2,1] = 0
+    fxx[3,2,2] = 0
+    fxx[3,2,3] = 0
+    fxx[3,3,1] = 0
+    fxx[3,3,2] = 0
+    fxx[3,3,3] = 0
+    fxu = zeros(model.ix,model.ix,model.iu)
+    fxu[1,1,1] = 0
+    fxu[1,1,2] = 0
+    fxu[1,2,1] = 0
+    fxu[1,2,2] = 0
+    fxu[1,3,1] = -sin(x3)
+    fxu[1,3,2] = 0
+    fxu[2,1,1] = 0
+    fxu[2,1,2] = 0
+    fxu[2,2,1] = 0
+    fxu[2,2,2] = 0
+    fxu[2,3,1] = cos(x3)
+    fxu[2,3,2] = 0
+    fxu[3,1,1] = 0
+    fxu[3,1,2] = 0
+    fxu[3,2,1] = 0
+    fxu[3,2,2] = 0
+    fxu[3,3,1] = 0
+    fxu[3,3,2] = 0
+    fux = permutedims(fxu, (1, 3, 2))
+    fuu = zeros(model.ix,model.iu,model.iu)
+    fuu[1,1,1] = 0
+    fuu[1,1,2] = 0
+    fuu[1,2,1] = 0
+    fuu[1,2,2] = 0
+    fuu[2,1,1] = 0
+    fuu[2,1,2] = 0
+    fuu[2,2,1] = 0
+    fuu[2,2,2] = 0
+    fuu[3,1,1] = 0
+    fuu[3,1,2] = 0
+    fuu[3,2,1] = 0
+    fuu[3,2,2] = 0
+    return fxx, fxu, fux, fuu
+end
+
 mutable struct Rocket <: Dynamics
     ix::Int64
     iu::Int64
