@@ -1,5 +1,5 @@
 # Define the Scaling struct with an inner constructor
-struct Scaling
+mutable struct Scaling
     Sx::Matrix{Float64}
     iSx::Matrix{Float64}
     sx::Vector{Float64}
@@ -9,6 +9,7 @@ struct Scaling
     S_sigma::Float64
     min_dt::Float64
     max_dt::Float64
+    s_ctcs::Float64
     
     # Define the inner constructor
     function Scaling(xmin, xmax, umin, umax, tmax, min_dt, max_dt)

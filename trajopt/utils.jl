@@ -38,7 +38,7 @@ function propagate_multiple_FOH(model::Dynamics,x::Matrix,u::Matrix,T::Vector)
     xnew[:,1] .= x[:,1]
     for i in 1:N
         prob = ODEProblem(model_wrapper!,x[:,i],tspan,(u[:,i],u[:,i+1],T[i]))
-        sol = solve(prob, Tsit5(), reltol=1e-6, abstol=1e-6;verbose=false);
+        sol = solve(prob, Tsit5(), reltol=1e-9, abstol=1e-9;verbose=false);
         tode = sol.t
         xode = stack(sol.u)
         if i == 1

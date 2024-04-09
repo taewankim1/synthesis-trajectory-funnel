@@ -3,15 +3,42 @@ abstract type Dynamics end
 mutable struct Unicycle <: Dynamics
     ix::Int
     iu::Int
-    # iw::Int
-    # iq::Int
-    # ip::Int
-    # C::Array{Float64,2}
-    # D::Array{Float64,2}
-    # E::Array{Float64,2}
-    # G::Array{Float64,2}
+    iϕ::Int
+    iv::Int
+    iψ::Int
+    iμ::Int
+    Cv::Array{Float64,2}
+    Dvu::Array{Float64,2}
+    G::Array{Float64,2}
+    Cμ::Array{Float64,2}
+    Dμu::Array{Float64,2}
+    β::Vector{Float64}
     function Unicycle()
-        new(3,2)
+        ix = 3
+        iu = 2
+        iϕ = 2
+        iv = 2
+
+        iψ = iϕ
+        iμ = iv
+        
+        # iψ = iϕ*iv
+        # iμ = iψ
+
+        Go = [1 0;0 1;0 0]
+        Cv = [0 0 1;0 0 0] 
+        Dvu = [0 0;1 0]
+
+        G = Go
+        Cμ = Cv
+        Dμu = Dvu
+
+        # G = kron(Go,ones(1,iv))
+        # Cμ = kron(ones(iϕ),Cv)
+        # Dμu = kron(ones(iϕ),Dvu)
+
+        β = zeros(iψ)
+        new(ix,iu,iϕ,iv,iψ,iμ,Cv,Dvu,G,Cμ,Dμu,β)
     end
 end
 

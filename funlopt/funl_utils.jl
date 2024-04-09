@@ -10,8 +10,8 @@ function get_radius_angle_Ellipse2D(Q_list)
 
     for i in 1:size(Q_list,3)
         Q_ = Q_list[:,:,i]
-        eigval = eigvals(inv(Q_))
-        radius = sqrt.(1 ./ eigval)
+        # eigval = eigvals(inv(Q_))
+        # radius = sqrt.(1 ./ eigval)
         # println("radius of x,y,theta: ", radius)
         A = [1 0 0; 0 1 0]
         Q_proj = A * Q_ * A'
@@ -29,7 +29,8 @@ end
 
 function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     x::Matrix,u::Matrix,T::Vector,
-    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3})
+    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3},
+    flag_single::Bool=false)
     N = size(x,2) - 1
     ix = model.ix
     iu = model.iu
@@ -78,7 +79,11 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     Qfwd = zeros(size(Q))
     Qfwd[:,:,1] = Q[:,:,1]
     for i = 1:N
-        V0 = [x[:,i];vec(Q[:,:,i])][:]
+        if flag_single == true
+            V0 = [x[:,i];vec(Qfwd[:,:,i])][:]
+        else
+            V0 = [x[:,i];vec(Q[:,:,i])][:]
+        end
 
         um = u[:,i]
         up = u[:,i+1]
@@ -89,7 +94,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         dt = T[i]
 
         prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt))
-        sol = solve(prob, Tsit5(), reltol=1e-6, abstol=1e-6;verbose=false);
+        sol = solve(prob, Tsit5(), reltol=1e-12, abstol=1e-12;verbose=false);
 
         tode = sol.t
         uode = zeros(iu,size(tode,1))
@@ -126,25 +131,3 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     end
     return Qfwd,tprop,xprop,uprop,Qprop,Yprop
 end
-
-
-# def get_radius_angle(Q_list) :
-#     radius_list = []
-#     angle_list = []
-#     for Q_ in Q_list :
-#         eig,_ = np.linalg.eig(np.linalg.inv(Q_))
-#         radius = np.sqrt(1/eig)
-#         # print("radius of x,y,theta",radius)
-#         A = np.array([[1,0,0],[0,1,0]])
-#         # Q_proj = project_ellipse(Q_) 
-#         Q_proj = A@Q_@A.T
-#         Q_inv = np.linalg.inv(Q_proj)
-#         eig,eig_vec = np.linalg.eig(Q_inv)
-#         radius = np.sqrt(1/eig)
-#         # print("radius of x and y",radius)
-#         rnew = eig_vec@np.array([[radius[0]],[0]])
-#         angle = np.arctan2(rnew[1],rnew[0])
-#         radius_list.append(radius)
-#         angle_list.append(angle)
-
-#     return radius_list,angle_list

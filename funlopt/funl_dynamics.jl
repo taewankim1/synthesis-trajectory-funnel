@@ -68,13 +68,15 @@ function forward(model::LinearQS, q::Vector, y::Vector, z::Vector, A::Matrix, B:
     Z = reshape(z,(model.ix,model.ix))
    
     L = A*Q
-    dQ = L + L' - B*Y*B' + model.alpha*Q + Z
+    # dQ = L + L' - B*Y*B' + model.alpha*Q + Z
+    dQ = A*Q + Q*A' - B*Y*B' + model.alpha*Q + Z
     return vec(dQ)
 end
 
 function diff(model::LinearQS,A::Matrix,B::Matrix)
     Imat = I(model.ix)
-    Aq = kron(Imat,A) + kron(A,Imat) * model.Cn + model.alpha * kron(Imat,Imat)
+    # Aq = kron(Imat,A) + kron(A,Imat) * model.Cn + model.alpha * kron(Imat,Imat)
+    Aq = kron(Imat,A) + kron(A,Imat) + model.alpha * kron(Imat,Imat)
     Bq = - kron(B,B)
     Sq = kron(Imat,Imat)
     return Aq,Bq,Sq
