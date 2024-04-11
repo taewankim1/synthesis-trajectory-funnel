@@ -8,69 +8,12 @@ include("funl_dynamics.jl")
 include("funl_utils.jl")
 include("funl_constraint.jl")
 include("funl_ctcs.jl")
+include("funl_synthesis.jl")
 include("../trajopt/dynamics.jl")
 include("../trajopt/scaling.jl")
 
-mutable struct FunnelSolution
-    Q::Array{Float64,3}
-    K::Array{Float64,3}
-    Y::Array{Float64,3}
-    Z::Array{Float64,3}
 
-    Aq::Array{Float64,3}
-    Bym::Array{Float64,3}
-    Byp::Array{Float64,3}
-    Bzm::Array{Float64,3}
-    Bzp::Array{Float64,3}
-
-    Qi::Matrix{Float64}
-    Qf::Matrix{Float64}
-
-    t::Vector{Float64}
-    tprop::Any
-    xprop::Any
-    uprop::Any
-    Qprop::Any
-    Kprop::Any
-    Yprop::Any
-
-    # Lsmooth
-    b::Any
-    θ::Any
-
-    # matrix for CTCS
-    Sq::Array{Float64,3}
-    Sym::Array{Float64,3}
-    Syp::Array{Float64,3}
-    Szm::Array{Float64,3}
-    Szp::Array{Float64,3}
-    SZ::Array{Float64,2}
-
-    # bounded disturbance
-    # uncertainty
-
-    function FunnelSolution(N::Int64,ix::Int64,iu::Int64,iq::Int64,iy::Int64)
-        Q = zeros(ix,ix,N+1)
-        K = zeros(iu,ix,N+1)
-        Y = zeros(iu,Int64(iy/iu),N+1)
-        Z = zeros(ix,ix,N+1)
-
-        Aq = zeros(iq,iq,N)
-        Bym = zeros(iq,iy,N)
-        Byp = zeros(iq,iy,N)
-        Bzm = zeros(iq,iq,N)
-        Bzp = zeros(iq,iq,N)
-
-        Qi = zeros(ix,ix)
-        Qf = zeros(ix,ix)
-        
-        t = zeros(N+1)
-        new(Q,K,Y,Z,Aq,Bym,Byp,Bzm,Bzp,Qi,Qf,t)
-        # new()
-    end
-end
-
-struct FunnelSynthesis
+struct FunnelRefinement
     dynamics::Dynamics
     funl_dynamics::FunnelDynamics
     funl_constraint::Vector{FunnelConstraint}
@@ -89,7 +32,7 @@ struct FunnelSynthesis
 
     flag_type::String
     funl_ctcs::Union{FunnelCTCS,Nothing}
-    function FunnelSynthesis(N::Int,max_iter::Int,
+    function FunnelRefinement(N::Int,max_iter::Int,
         dynamics::Dynamics,funl_dynamics::FunnelDynamics,funl_constraint::Vector{T},scaling::Scaling,
         w_funl::Float64,w_vc::Float64,w_tr::Float64,tol_tr::Float64,tol_vc::Float64,tol_dyn::Float64,
         verbosity::Bool;flag_type::String="Linear",funl_ctcs::Any=nothing) where T <: FunnelConstraint
@@ -109,7 +52,7 @@ struct FunnelSynthesis
     end
 end
 
-function LMILsmooth!(fs::FunnelSynthesis,model::Model,Q::Matrix,Y::Matrix,Z::Matrix,b::Any,θ::Vector)
+function LMILsmooth!(fs::FunnelRefinement,model::Model,Q::Matrix,Y::Matrix,Z::Matrix,b::Any,θ::Vector)
     tmp12 = fs.dynamics.Cv*Q + fs.dynamics.Dvu*Y
     Bound_b = [b * I(fs.dynamics.iv) tmp12;
         tmp12' Q
@@ -131,7 +74,7 @@ function LMILsmooth!(fs::FunnelSynthesis,model::Model,Q::Matrix,Y::Matrix,Z::Mat
     @constraint(model, LMI <= 0, PSDCone())
 end
 
-function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,iteration::Int64)
+function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,iteration::Int64)
     N = fs.N
     ix = fs.dynamics.ix
     iu = fs.dynamics.iu
@@ -143,22 +86,11 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     end
 
     Qbar = fs.solution.Q
-    Ybar = fs.solution.Y
+    Kbar = fs.solution.K
     Zbar = fs.solution.Z
 
     Sx = fs.scaling.Sx
     iSx = fs.scaling.iSx
-    Su = fs.scaling.Su
-    iSu = fs.scaling.iSu
-    if typeof(fs.funl_dynamics) == LinearDLMI
-        Sr = Sx
-        iSr = iSx
-        ir = ix
-    elseif typeof(fs.funl_dynamics) == LinearQS
-        Sr = Su
-        iSr = iSu
-        ir = iu
-    end
 
     if solver == "Mosek"
         model = Model(Mosek.Optimizer)
@@ -169,18 +101,11 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
         println("You should select Mosek or Clarabel")
     end
 
-
     # cvx variables (scaled)
     Qcvx = []
-    Ycvx = []
     Zcvx = []
     for i in 1:(N+1)
         push!(Qcvx, @variable(model, [1:ix, 1:ix], PSD))
-        if typeof(fs.funl_dynamics) == LinearDLMI
-            push!(Ycvx, @variable(model, [1:iu, 1:ir]))
-        elseif typeof(fs.funl_dynamics) == LinearQS
-            push!(Ycvx, @variable(model, [1:iu, 1:ir],PSD))
-        end
         push!(Zcvx, @variable(model, [1:ix, 1:ix]))
     end
     @variable(model, vc[1:is,1:N])
@@ -194,12 +119,10 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
 
     # scale reference trajectory
     Qbar_scaled = zeros(ix,ix,N+1)
-    Ybar_scaled = zeros(iu,ir,N+1)
     Zbar_scaled = zeros(ix,ix,N+1)
 
     for i in 1:N+1
         Qbar_scaled[:,:,i] .= iSx*Qbar[:,:,i]*iSx
-        Ybar_scaled[:,:,i] .= iSu*Ybar[:,:,i]*iSr
         Zbar_scaled[:,:,i] .= iSx*Zbar[:,:,i]*iSx
     end
 
@@ -210,22 +133,19 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     # funnel dynamics
     for i in 1:N
         Qi = Sx*Qcvx[i]*Sx
-        Yi = Su*Ycvx[i]*Sr
         Zi = Sx*Zcvx[i]*Sx
         Qip = Sx*Qcvx[i+1]*Sx
-        Yip = Su*Ycvx[i+1]*Sr
         Zip = Sx*Zcvx[i+1]*Sx
         @constraint(model, vec(Qip) == fs.solution.Aq[:,:,i]*vec(Qi) +
-            fs.solution.Bym[:,:,i]*vec(Yi) + fs.solution.Byp[:,:,i]*vec(Yip) +
             fs.solution.Bzm[:,:,i]*vec(Zi) + fs.solution.Bzp[:,:,i]*vec(Zip))
-        # CTCS
-        if fs.funl_ctcs !== nothing && iteration != 1
-            @constraint(model, zeros(fs.funl_ctcs.is) == fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
-                fs.solution.Sym[:,:,i]*vec(Yi) + fs.solution.Syp[:,:,i]*vec(Yip) +
-                fs.solution.Szm[:,:,i]*vec(Zi) + fs.solution.Szp[:,:,i]*vec(Zip) + fs.solution.SZ[:,i]) 
-                # + vc[:,i]
-                )
-        end
+        # # CTCS
+        # if fs.funl_ctcs !== nothing && iteration != 1
+        #     @constraint(model, zeros(fs.funl_ctcs.is) == fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
+        #         fs.solution.Sym[:,:,i]*vec(Yi) + fs.solution.Syp[:,:,i]*vec(Yip) +
+        #         fs.solution.Szm[:,:,i]*vec(Zi) + fs.solution.Szp[:,:,i]*vec(Zip) + fs.solution.SZ[:,i]) 
+        #         # + vc[:,i]
+        #         )
+        # end
     end
 
 
@@ -246,12 +166,8 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
         end
         for i in 1:N+1
             Qi = Sx*Qcvx[i]*Sx
-            if typeof(fs.funl_dynamics) == LinearDLMI
-                Yi = Su*Ycvx[i]*Sr
-            elseif typeof(fs.funl_dynamics) == LinearQS
-                A,B = diff(fs.dynamics,xnom[:,i],unom[:,i])
-                Yi = -0.5*(Su*Ycvx[i]*Sr)*B'
-            end
+            Ki = Kbar[:,:,i]
+            Yi = Ki*Qi
             Zi = Sx*Zcvx[i]*Sx
             LMILsmooth!(fs,model,Qi,Yi,Zi,b[i],θ[:,i])
         end
@@ -265,13 +181,10 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     N_constraint = size(fs.funl_constraint,1)
     for i in 1:N+1
         for j in 1:N_constraint
-            if typeof(fs.funl_dynamics) == LinearDLMI
-                Y = Su*Ycvx[i]*Sr
-            elseif typeof(fs.funl_dynamics) == LinearQS
-                A,B = diff(fs.dynamics,xnom[:,i],unom[:,i])
-                Y = -0.5*(Su*Ycvx[i]*Sr)*B'
-            end
-            impose!(fs.funl_constraint[j],model,Sx*Qcvx[i]*Sx,Y,xnom[:,i],unom[:,i])
+            Qi = Sx*Qcvx[i]*Sx
+            Ki = Kbar[:,:,i]
+            Yi = Ki*Qi
+            impose!(fs.funl_constraint[j],model,Qi,Yi,xnom[:,i],unom[:,i])
         end
     end
 
@@ -291,7 +204,6 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
 
     # trust region
     cost_tr = sum([dot(vec(Qcvx[i]-Qbar_scaled[:,:,i]),vec(Qcvx[i]-Qbar_scaled[:,:,i])) +
-        dot(vec(Ycvx[i]-Ybar_scaled[:,:,i]),vec(Ycvx[i]-Ybar_scaled[:,:,i])) +
         dot(vec(Zcvx[i]-Zbar_scaled[:,:,i]),vec(Zcvx[i]-Zbar_scaled[:,:,i]))
         for i in 1:N+1])
     w_tr = iteration > 1 ? fs.w_tr : 0
@@ -303,7 +215,6 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
 
     for i in 1:N+1
         fs.solution.Q[:,:,i] .= Sx*value.(Qcvx[i])*Sx
-        fs.solution.Y[:,:,i] .= Su*value.(Ycvx[i])*Sr
         fs.solution.Z[:,:,i] .= Sx*value.(Zcvx[i])*Sx
     end
     if fs.flag_type == "Lsmooth"
@@ -316,9 +227,9 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     return value(cost_all),value(cost_funl),value(cost_vc),value(cost_tr)
 end
 
-function run(fs::FunnelSynthesis,Q0::Array{Float64,3},Y0::Array{Float64,3},Z0::Array{Float64,3},Qi::Matrix,Qf::Matrix,xnom::Matrix,unom::Matrix,dtnom::Vector,solver::String,θ0=nothing)
+function run(fs::FunnelRefinement,Q0::Array{Float64,3},K0::Array{Float64,3},Z0::Array{Float64,3},Qi::Matrix,Qf::Matrix,xnom::Matrix,unom::Matrix,dtnom::Vector,solver::String,θ0=nothing)
     fs.solution.Q .= Q0
-    fs.solution.Y .= Y0
+    fs.solution.K .= K0
     fs.solution.Z .= Z0
 
     fs.solution.Qi .= Qi 
@@ -331,24 +242,24 @@ function run(fs::FunnelSynthesis,Q0::Array{Float64,3},Y0::Array{Float64,3},Z0::A
     for iteration in 1:fs.max_iter
         # discretization & linearization
         if fs.funl_ctcs === nothing
-            fs.solution.Aq,fs.solution.Bym,fs.solution.Byp,fs.solution.Bzm,fs.solution.Bzp = discretize_foh(fs.funl_dynamics,
-                fs.dynamics,xnom[:,1:N],unom,dtnom,fs.solution.Q[:,:,1:N],fs.solution.Y,fs.solution.Z)
-        else
-            (
-                fs.solution.Aq,fs.solution.Bym,fs.solution.Byp,fs.solution.Bzm,fs.solution.Bzp,
-                fs.solution.Sq,fs.solution.Sym,fs.solution.Syp,fs.solution.Szm,fs.solution.Szp,fs.solution.SZ,
-                ~,~,s_prop 
-            ) = discretize_foh(fs.funl_dynamics,fs.dynamics,fs.funl_ctcs,
-                xnom[:,1:N],unom,dtnom,fs.solution.Q[:,:,1:N],fs.solution.Y,fs.solution.Z)
-            println(s_prop)
+            fs.solution.Aq,fs.solution.Bzm,fs.solution.Bzp = discretize_foh(fs.funl_dynamics,
+                fs.dynamics,xnom[:,1:N],unom,dtnom,fs.solution.Q[:,:,1:N],fs.solution.K,fs.solution.Z)
+        # else
+        #     (
+        #         fs.solution.Aq,fs.solution.Bym,fs.solution.Byp,fs.solution.Bzm,fs.solution.Bzp,
+        #         fs.solution.Sq,fs.solution.Sym,fs.solution.Syp,fs.solution.Szm,fs.solution.Szp,fs.solution.SZ,
+        #         ~,~,s_prop 
+        #     ) = discretize_foh(fs.funl_dynamics,fs.dynamics,fs.funl_ctcs,
+        #         xnom[:,1:N],unom,dtnom,fs.solution.Q[:,:,1:N],fs.solution.Y,fs.solution.Z)
+        #     println(s_prop)
         end
 
         # solve subproblem
         c_all, c_funl, c_vc, c_tr = sdpopt!(fs,xnom,unom,solver,iteration)
 
         # propagate
-        Qfwd,fs.solution.tprop,fs.solution.xprop,fs.solution.uprop,fs.solution.Qprop,fs.solution.Yprop =  propagate_multiple_FOH(fs.funl_dynamics,fs.dynamics,
-            xnom,unom,dtnom,fs.solution.Q,fs.solution.Y,fs.solution.Z,false)
+        Qfwd,fs.solution.tprop,fs.solution.xprop,fs.solution.uprop,fs.solution.Qprop,fs.solution.Kprop =  propagate_multiple_FOH(fs.funl_dynamics,fs.dynamics,
+            xnom,unom,dtnom,fs.solution.Q,fs.solution.K,fs.solution.Z,false)
         dyn_error = maximum([norm(Qfwd[:,:,i] - fs.solution.Q[:,:,i],2) for i in 1:N+1])
 
         if fs.verbosity == true && iteration == 1

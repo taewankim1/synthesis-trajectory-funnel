@@ -211,3 +211,42 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
     end
     return Aq,Bym,Byp,Bzm,Bzp,Sq,Sym,Syp,Szm,Szp,SZ,x_prop,q_prop,s_prop
 end
+struct QPDDet <: FunnelCTCS
+    epsilon::Float64
+    is::Int
+    ix::Int
+    iu::Int
+
+    iq::Int
+    iy::Int
+    function QPDDet(epsilon,ix,iu)
+        @assert epsilon >= 0
+        is = 1
+        new(epsilon,is,ix,iu,ix*ix,ix*iu)
+    end
+end
+
+function forward(model::QPDDet, q::Vector, y::Vector, z::Vector)
+    Q = reshape(q,(model.ix,model.ix))
+    epsilon = model.epsilon * I(ix)
+    g = - det(Q-epsilon)
+    return max(0,g)^2
+end
+
+function diff(model::QPDDet, q::Vector, y::Vector, z::Vector)
+    Q = reshape(q,(model.ix,model.ix))
+    Aq = zeros(model.is,model.iq)
+    Bq = zeros(model.is,model.iy)
+    Sq = zeros(model.is,model.iq)
+    epsilon = model.epsilon * I(ix)
+
+    g = - det(Q-epsilon)
+    if g >= 0
+        dfg = 2*g
+    else
+        dfg = 0
+    end
+    dg = - det(Q-epsilon) * inv(Q-epsilon)
+    Aq[1,:] .= dfg*vec(dg)
+    return Aq,Bq,Sq
+end
