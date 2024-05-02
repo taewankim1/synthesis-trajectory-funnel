@@ -76,6 +76,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     uprop = []
     qprop = []
     yprop = []
+    zprop = []
     Qfwd = zeros(size(Q))
     Qfwd[:,:,1] = Q[:,:,1]
     for i = 1:N
@@ -99,11 +100,13 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         tode = sol.t
         uode = zeros(iu,size(tode,1))
         yode = zeros(iy,size(tode,1))
+        zode = zeros(iq,size(tode,1))
         for idx in 1:length(tode)
             alpha = (dt - tode[idx]) / dt
             beta = tode[idx] / dt
             uode[:,idx] .= alpha * um + beta * up
             yode[:,idx] .= alpha * ym + beta * yp
+            zode[:,idx] .= alpha * zm + beta * zp
         end
         ode = stack(sol.u)
         xode = ode[idx_x,:]
@@ -114,20 +117,25 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
             uprop = uode
             qprop = qode
             yprop = yode
+            zprop = zode
         else 
             tprop = vcat(tprop,sum(T[1:i-1]).+tode)
             xprop = hcat(xprop,xode)
             uprop = hcat(uprop,uode)
             qprop = hcat(qprop,qode)
             yprop = hcat(yprop,yode)
+            zprop = hcat(zprop,zode)
         end
         Qfwd[:,:,i+1] = reshape(qode[:,end],(ix,ix))
     end
     Qprop = zeros(ix,ix,length(tprop))
     Yprop = zeros(iu,Int64(iy/iu),length(tprop))
+    Zprop = zeros(ix,ix,length(tprop))
     for i in 1:length(tprop)
         Qprop[:,:,i] .= reshape(qprop[:,i],(ix,ix))
         Yprop[:,:,i] .= reshape(yprop[:,i],(iu,Int64(iy/iu)))
+        Zprop[:,:,i] .= reshape(zprop[:,i],(ix,ix))
     end
-    return Qfwd,tprop,xprop,uprop,Qprop,Yprop
+    return Qfwd,tprop,xprop,uprop,Qprop,Yprop,Zprop
 end
+

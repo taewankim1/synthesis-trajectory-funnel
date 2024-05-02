@@ -19,13 +19,16 @@ struct LinearDLMI <: FunnelDynamics
 
     iq::Int
     iy::Int
+    ip::Int
 
     Cn::Matrix # commutation matrix
     Cm::Matrix # commutation matrix
     function LinearDLMI(alpha,ix,iu)
         Cn = com_mat(ix,ix)
         Cm = com_mat(iu,ix)
-        new(alpha,ix,iu,ix*ix,ix*iu,Cn,Cm)
+        # ip = ix*ix# + 1 # Z11, b
+        ip = 0
+        new(alpha,ix,iu,ix*ix,ix*iu,ip,Cn,Cm)
     end
 end
 
@@ -46,43 +49,6 @@ function diff(model::LinearDLMI,A::Matrix,B::Matrix)
     Sq = kron(Imat,Imat)
     return Aq,Bq,Sq
 end
-
-struct LinearQS <: FunnelDynamics
-    alpha::Float64 # decay rate
-    ix::Int
-    iu::Int
-
-    iq::Int
-    iy::Int
-
-    Cn::Matrix # commutation matrix
-    function LinearQS(alpha,ix,iu)
-        Cn = com_mat(ix,ix)
-        new(alpha,ix,iu,ix*ix,iu*iu,Cn)
-    end
-end
-
-
-function forward(model::LinearQS, q::Vector, y::Vector, z::Vector, A::Matrix, B::Matrix)
-    Q = reshape(q,(model.ix,model.ix))
-    Y = reshape(y,(model.iu,model.iu))
-    Z = reshape(z,(model.ix,model.ix))
-   
-    L = A*Q
-    # dQ = L + L' - B*Y*B' + model.alpha*Q + Z
-    dQ = A*Q + Q*A' - B*Y*B' + model.alpha*Q + Z
-    return vec(dQ)
-end
-
-function diff(model::LinearQS,A::Matrix,B::Matrix)
-    Imat = I(model.ix)
-    # Aq = kron(Imat,A) + kron(A,Imat) * model.Cn + model.alpha * kron(Imat,Imat)
-    Aq = kron(Imat,A) + kron(A,Imat) + model.alpha * kron(Imat,Imat)
-    Bq = - kron(B,B)
-    Sq = kron(Imat,Imat)
-    return Aq,Bq,Sq
-end
-
 
 function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
         x::Matrix,u::Matrix,T::Vector,
@@ -308,4 +274,40 @@ function discretize_foh(model::LinearQZ,dynamics::Dynamics,
         Bp[:,:,i] .= reshape(sol[idx_Bp,end],iq,iq)
     end
     return Aq,Bm,Bp,x_prop,q_prop
+end
+
+struct LinearQS <: FunnelDynamics
+    alpha::Float64 # decay rate
+    ix::Int
+    iu::Int
+
+    iq::Int
+    iy::Int
+
+    Cn::Matrix # commutation matrix
+    function LinearQS(alpha,ix,iu)
+        Cn = com_mat(ix,ix)
+        new(alpha,ix,iu,ix*ix,iu*iu,Cn)
+    end
+end
+
+
+function forward(model::LinearQS, q::Vector, y::Vector, z::Vector, A::Matrix, B::Matrix)
+    Q = reshape(q,(model.ix,model.ix))
+    Y = reshape(y,(model.iu,model.iu))
+    Z = reshape(z,(model.ix,model.ix))
+   
+    L = A*Q
+    # dQ = L + L' - B*Y*B' + model.alpha*Q + Z
+    dQ = A*Q + Q*A' - B*Y*B' + model.alpha*Q + Z
+    return vec(dQ)
+end
+
+function diff(model::LinearQS,A::Matrix,B::Matrix)
+    Imat = I(model.ix)
+    # Aq = kron(Imat,A) + kron(A,Imat) * model.Cn + model.alpha * kron(Imat,Imat)
+    Aq = kron(Imat,A) + kron(A,Imat) + model.alpha * kron(Imat,Imat)
+    Bq = - kron(B,B)
+    Sq = kron(Imat,Imat)
+    return Aq,Bq,Sq
 end

@@ -255,6 +255,7 @@ function sdpopt!(js::JointSynthesis,solver::String)
     @variable(model, log_det_Q)
     @constraint(model, [log_det_Q; 1; vec(Sx*Qcvx[1]*Sx)] in MOI.LogDetConeSquare(ix))
     # cost_funl = - tr(Sx*Qcvx[1]*Sx) + tr(Sx*Qcvx[end]*Sx)
+    # cost_funl = - tr(Sx*Qcvx[1]*Sx)
     # cost_funl = tr(Sx*Qcvx[end]*Sx)
     cost_funl = - log_det_Q
 

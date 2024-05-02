@@ -9,7 +9,7 @@ mutable struct Unicycle <: Dynamics
     iμ::Int
     Cv::Array{Float64,2}
     Dvu::Array{Float64,2}
-    G::Array{Float64,2}
+    G::Union{Vector,Matrix}
     Cμ::Array{Float64,2}
     Dμu::Array{Float64,2}
     β::Vector{Float64}
@@ -20,12 +20,14 @@ mutable struct Unicycle <: Dynamics
         iv = 2
 
         iψ = iϕ
+        # iψ = 1
         iμ = iv
         
         # iψ = iϕ*iv
         # iμ = iψ
 
         Go = [1 0;0 1;0 0]
+        # Go = [1;1;0]
         Cv = [0 0 1;0 0 0] 
         Dvu = [0 0;1 0]
 

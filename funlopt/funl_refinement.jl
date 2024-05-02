@@ -52,38 +52,12 @@ struct FunnelRefinement
     end
 end
 
-function LMILsmooth!(fs::FunnelRefinement,model::Model,Q::Matrix,Y::Matrix,Z::Matrix,b::Any,θ::Vector)
-    tmp12 = fs.dynamics.Cv*Q + fs.dynamics.Dvu*Y
-    Bound_b = [b * I(fs.dynamics.iv) tmp12;
-        tmp12' Q
-    ]
-    @constraint(model, 0 <= Bound_b, PSDCone())
-
-    N11 =  diagm(θ ./ ( fs.dynamics.β .* fs.dynamics.β))
-    N22 =  b .* diagm(θ)
-    LMI11 = -Z
-    LMI21 = N22 * fs.dynamics.G'
-    LMI22 = -N22
-    LMI31 = fs.dynamics.Cμ * Q + fs.dynamics.Dμu * Y
-    LMI32 = zeros(fs.dynamics.iμ,fs.dynamics.iψ)
-    LMI33 = -N11
-    LMI = [LMI11 LMI21' LMI31';
-        LMI21 LMI22 LMI32';
-        LMI31 LMI32 LMI33
-    ]
-    @constraint(model, LMI <= 0, PSDCone())
-end
-
 function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,iteration::Int64)
     N = fs.N
     ix = fs.dynamics.ix
     iu = fs.dynamics.iu
     iq = fs.funl_dynamics.iq
-    if fs.funl_ctcs !== nothing
-        is = fs.funl_ctcs.is
-    else
-        is = 1
-    end
+    is =  fs.funl_ctcs === nothing ? 0 : fs.funl_ctcs.is
 
     Qbar = fs.solution.Q
     Kbar = fs.solution.K
@@ -91,10 +65,9 @@ function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,i
 
     Sx = fs.scaling.Sx
     iSx = fs.scaling.iSx
-
     if solver == "Mosek"
         model = Model(Mosek.Optimizer)
-        set_optimizer_attribute(model, "MSK_IPAR_LOG", 0) # Turn off verbosity for Mosek
+        # set_optimizer_attribute(model, "MSK_IPAR_LOG", 0) # Turn off verbosity for Mosek
     elseif solver == "Clarabel"
         model = Model(Clarabel.Optimizer)
     else
@@ -108,8 +81,8 @@ function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,i
         push!(Qcvx, @variable(model, [1:ix, 1:ix], PSD))
         push!(Zcvx, @variable(model, [1:ix, 1:ix]))
     end
-    @variable(model, vc[1:is,1:N])
-    @variable(model, vc_t[1:N])
+    @variable(model, bcvx[1:N+1])
+    θ = fs.solution.θ # parameter
 
     # Q is PD
     very_small = 1e-4
@@ -120,87 +93,58 @@ function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,i
     # scale reference trajectory
     Qbar_scaled = zeros(ix,ix,N+1)
     Zbar_scaled = zeros(ix,ix,N+1)
-
     for i in 1:N+1
         Qbar_scaled[:,:,i] .= iSx*Qbar[:,:,i]*iSx
         Zbar_scaled[:,:,i] .= iSx*Zbar[:,:,i]*iSx
     end
 
     # boundary condition
-    @constraint(model, Sx*Qcvx[1]*Sx >= fs.solution.Qi, PSDCone())
-    @constraint(model, Sx*Qcvx[end]*Sx <= fs.solution.Qf, PSDCone())
+    boundary_initial!(fs,model,Sx*Qcvx[1]*Sx)
+    boundary_final!(fs,model,Sx*Qcvx[end]*Sx)
 
-    # funnel dynamics
-    for i in 1:N
-        Qi = Sx*Qcvx[i]*Sx
-        Zi = Sx*Zcvx[i]*Sx
-        Qip = Sx*Qcvx[i+1]*Sx
-        Zip = Sx*Zcvx[i+1]*Sx
-        @constraint(model, vec(Qip) == fs.solution.Aq[:,:,i]*vec(Qi) +
-            fs.solution.Bzm[:,:,i]*vec(Zi) + fs.solution.Bzp[:,:,i]*vec(Zip))
-        # # CTCS
-        # if fs.funl_ctcs !== nothing && iteration != 1
-        #     @constraint(model, zeros(fs.funl_ctcs.is) == fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
-        #         fs.solution.Sym[:,:,i]*vec(Yi) + fs.solution.Syp[:,:,i]*vec(Yip) +
-        #         fs.solution.Szm[:,:,i]*vec(Zi) + fs.solution.Szp[:,:,i]*vec(Zip) + fs.solution.SZ[:,i]) 
-        #         # + vc[:,i]
-        #         )
-        # end
-    end
-
-
-    # Block LMI
-    if fs.flag_type == "Linear"
-        for i in 1:N+1
-            @constraint(model, 0 <= Zcvx[i], PSDCone())
-            # @constraint(model, 0 .== Zcvx[i])
-        end
-    elseif fs.flag_type == "Lsmooth"
-        iψ = fs.dynamics.iψ
-        if iteration % 2 == 1
-            @variable(model, b[1:N+1])
-            θ = fs.solution.θ
-        else
-            @variable(model, θ[1:iψ,1:N+1])
-            b = fs.solution.b
-        end
-        for i in 1:N+1
-            Qi = Sx*Qcvx[i]*Sx
-            Ki = Kbar[:,:,i]
-            Yi = Ki*Qi
-            Zi = Sx*Zcvx[i]*Sx
-            LMILsmooth!(fs,model,Qi,Yi,Zi,b[i],θ[:,i])
-        end
-    # elseif fs.flag_type = "LD"
-    # elseif fs.flag_type = "LDIQC"
-    end
-
-    # Lsmooth
-    
-    # constraint
-    N_constraint = size(fs.funl_constraint,1)
     for i in 1:N+1
-        for j in 1:N_constraint
-            Qi = Sx*Qcvx[i]*Sx
-            Ki = Kbar[:,:,i]
-            Yi = Ki*Qi
-            impose!(fs.funl_constraint[j],model,Qi,Yi,xnom[:,i],unom[:,i])
+        Qi = Sx*Qcvx[i]*Sx
+        Ki = Kbar[:,:,i]
+        Yi = Ki*Qi
+        Zi = Sx*Zcvx[i]*Sx
+        bi = bcvx[i]
+        if i<= N
+            Qip = Sx*Qcvx[i+1]*Sx
+            Kip = Kbar[:,:,i+1]
+            Yip = Kip*Qip
+            Zip = Sx*Zcvx[i+1]*Sx
+            bip = bcvx[i+1]
         end
+        if i <= N
+            @constraint(model, vec(Qip) == fs.solution.Aq[:,:,i]*vec(Qi) +
+                fs.solution.Bzm[:,:,i]*vec(Zi) + fs.solution.Bzp[:,:,i]*vec(Zip))
+        end
+
+        # Lyapunov condition
+        if fs.flag_type == "Linear"
+            @constraint(model, 0 <= Zcvx[i], PSDCone())
+        elseif fs.flag_type == "Lsmooth"
+            LMILsmooth!(fs,model,Qi,Yi,Zi,bi,i,iteration)
+        end
+
+        # constraints
+        state_input_constraints!(fs,model::Model,Qi,Yi,xnom[:,i],unom[:,i])
     end
 
     # cost
     @variable(model, log_det_Q)
     @constraint(model, [log_det_Q; 1; vec(Sx*Qcvx[1]*Sx)] in MOI.LogDetConeSquare(ix))
-    cost_funl = - tr(Sx*Qcvx[1]*Sx) + tr(Sx*Qcvx[end]*Sx)
+    # cost_funl = - tr(Sx*Qcvx[1]*Sx) + tr(Sx*Qcvx[end]*Sx)
     # cost_funl = tr(Sx*Qcvx[end]*Sx)
     # cost_funl = - log_det_Q
-    # cost_funl = - tr(Sx*Qcvx[1]*Sx)
+    cost_funl = - tr(Sx*Qcvx[1]*Sx)
 
     # virtual control
-    for i in 1:N
-        @constraint(model, [vc_t[i]; vc[:,i]] in MOI.NormOneCone(1 + is))
-    end
-    cost_vc = sum([vc_t[i] for i in 1:N])
+    # for i in 1:N
+    #     @constraint(model, [vc_t[i]; vc[:,i]] in MOI.NormOneCone(1 + is))
+    # end
+    # cost_vc = sum([vc_t[i] for i in 1:N])
+    cost_vc = 0
 
     # trust region
     cost_tr = sum([dot(vec(Qcvx[i]-Qbar_scaled[:,:,i]),vec(Qcvx[i]-Qbar_scaled[:,:,i])) +
@@ -217,13 +161,8 @@ function sdpopt!(fs::FunnelRefinement,xnom::Matrix,unom::Matrix,solver::String,i
         fs.solution.Q[:,:,i] .= Sx*value.(Qcvx[i])*Sx
         fs.solution.Z[:,:,i] .= Sx*value.(Zcvx[i])*Sx
     end
-    if fs.flag_type == "Lsmooth"
-        if iteration % 2 == 1
-            fs.solution.b = value.(b)
-        else
-            fs.solution.θ = value.(θ)
-        end
-    end
+    fs.solution.b = value.(bcvx)
+
     return value(cost_all),value(cost_funl),value(cost_vc),value(cost_tr)
 end
 

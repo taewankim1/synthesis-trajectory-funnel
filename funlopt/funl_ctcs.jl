@@ -7,7 +7,6 @@ abstract type FunnelCTCS end
 
 struct QPD <: FunnelCTCS
     M::Float64
-    N::Float64
     epsilon::Float64
     is::Int
     ix::Int
@@ -15,48 +14,233 @@ struct QPD <: FunnelCTCS
 
     iq::Int
     iy::Int
-    function QPD(M,N,epsilon,ix,iu)
-        @assert M >= 1
-        @assert N >= 0
+    function QPD(M,epsilon,ix,iu)
+        @assert M >= 0
         @assert epsilon >= 0
         is = 1
-        new(M,N,epsilon,is,ix,iu,ix*ix,ix*iu)
+        new(M,epsilon,is,ix,iu,ix*ix,ix*iu)
     end
 end
 
-function forward(model::QPD, q::Vector, y::Vector, z::Vector)
+function forward(model::QPD, q::Vector, y::Vector, z::Vector, b::Float64)
     # -M - logdetQ
     Q = reshape(q,(model.ix,model.ix))
     M = model.M
-    N = model.N
     epsilon = model.epsilon * I(ix)
-    g = log(M) - log(N*det(Q-epsilon) + M)
-    return max(0,g)^2
+    # g = log(M) - log(N*det(Q-epsilon) + M)
+    # g = N*(log(M) - log(det(Q-epsilon) + M))
+    H = -Q + epsilon
+    # eigval,eigvec = eigen(Symmetric(H))
+    eigval,eigvec = eigen(H)
+    # eigenvec_large = eigvec[:,end]
+    g = eigval[end]
+    return max(0,M*g)^2
 end
 
-function diff(model::QPD, q::Vector, y::Vector, z::Vector)
+function diff(model::QPD, q::Vector, y::Vector, z::Vector, b::Float64)
     Q = reshape(q,(model.ix,model.ix))
     Aq = zeros(model.is,model.iq)
-    Bq = zeros(model.is,model.iy)
-    Sq = zeros(model.is,model.iq)
+    Sy = zeros(model.is,model.iy)
+    Sz = zeros(model.is,model.iq)
+    Sb = zeros(model.is,1)
+    
     M = model.M
-    N = model.N
     epsilon = model.epsilon * I(ix)
 
-    g = log(M) - log(N*det(Q-epsilon) + M)
+    H = -Q + epsilon
+    eigval,eigvec = eigen(Symmetric(H))
+    g = eigval[end]
+    eigvec_large = eigvec[:,end]
+    dg =  - eigvec_large * eigvec_large'
+
     if g >= 0
+        # dfg = 1
         dfg = 2*g
     else
         dfg = 0
     end
-    dg = - N*det(Q-epsilon) / (N*det(Q-epsilon) + M) * inv(Q-epsilon)
-    Aq[1,:] .= dfg*vec(dg)
-    return Aq,Bq,Sq
+    Aq[1,:] .= M*dfg*vec(dg)
+    return Aq,Sy,Sz,Sb
 end
+
+struct HLsmooth <: FunnelCTCS
+    M::Float64
+    # N::Float64
+    epsilon::Float64
+    is::Int
+    θ::Float64
+    dynamics::Any
+    Cq::Matrix
+    Cy::Matrix
+    function HLsmooth(M,epsilon,θ,dynamics)
+        @assert M >= 0
+        # @assert N >= 0
+        @assert epsilon >= 0
+        is = 1
+        Cq = com_mat(ix,ix)
+        Cy = com_mat(iu,ix)
+        new(M,epsilon,is,θ,dynamics,Cq,Cy)
+    end
+end
+
+function forward(model::HLsmooth, q::Vector, y::Vector,z::Vector,b::Float64)
+    # -M - logdetQ
+    ix = model.dynamics.ix
+    iu = model.dynamics.iu
+    iμ = model.dynamics.iμ
+    iψ = model.dynamics.iψ
+    θ = model.θ
+
+    Q = reshape(q,(ix,ix))
+    Y = reshape(y,(iu,ix))
+    Z = reshape(z,(ix,ix))
+
+    N11 = diagm(θ ./ ( model.dynamics.β .* model.dynamics.β))
+    N22 =  b .* θ .* Matrix{Float64}(I, iψ, iψ)
+
+    LMI11 = -Z
+    LMI21 = N22 * model.dynamics.G'
+    LMI22 = -N22
+    LMI31 = model.dynamics.Cμ * Q + model.dynamics.Dμu * Y
+    LMI32 = zeros(iμ,iψ)
+    LMI33 = -N11
+    LMI = [LMI11 LMI21' LMI31';
+        LMI21 LMI22 LMI32';
+        LMI31 LMI32 LMI33
+    ]
+    iLMI = size(LMI,1)
+    epsilon = model.epsilon * Matrix{Float64}(I, iLMI, iLMI)
+    H = LMI + epsilon
+    # eigval,eigvec = eigen(Symmetric(H))
+    eigval,eigvec = eigen(H)
+    g = eigval[end]
+    return max(0,model.M*g)^2
+end
+
+function diff(model::HLsmooth,q::Vector, y::Vector,z::Vector,b::Float64)
+    ix = model.dynamics.ix
+    iu = model.dynamics.iu
+    iμ = model.dynamics.iμ
+    iψ = model.dynamics.iψ
+    θ = model.θ
+
+    iq = size(q,1)
+    iy = size(y,1)
+    iz = size(z,1)
+
+    Aq = zeros(model.is,iq)
+    Sy = zeros(model.is,iy)
+    Sz = zeros(model.is,iq)
+    Sb = zeros(model.is,1)
+
+    Q = reshape(q,(ix,ix))
+    Y = reshape(y,(iu,ix))
+    Z = reshape(z,(ix,ix))
+
+    N11 = diagm(θ ./ ( model.dynamics.β .* model.dynamics.β))
+    N22 =  b .* θ .* Matrix{Float64}(I, iψ, iψ)
+    LMI11 = -Z
+    LMI21 = N22 * model.dynamics.G'
+    LMI22 = -N22
+    LMI31 = model.dynamics.Cμ * Q + model.dynamics.Dμu * Y
+    LMI32 = zeros(iμ,iψ)
+    LMI33 = -N11
+    LMI = [LMI11 LMI21' LMI31';
+        LMI21 LMI22 LMI32';
+        LMI31 LMI32 LMI33
+    ]
+    iLMI = size(LMI,1)
+    epsilon = model.epsilon * Matrix{Float64}(I, iLMI, iLMI)
+    H = LMI + epsilon
+    # eigval,eigvec = eigen(Symmetric(H))
+    eigval,eigvec = eigen(H)
+    g = eigval[end]
+    if g >= 0
+        # dfg = 1
+        dfg = 2*g
+    else
+        dfg = 0
+    end
+    dλdH = model.M .* vec(eigvec[:,end] * eigvec[:,end]')'
+
+    FQ = [zeros(ix,ix);zeros(iψ,ix);model.dynamics.Cμ]
+    RQ = [I(ix) zeros(ix,iψ) zeros(ix,iμ)]
+    dHdq = kron(RQ',FQ) + kron(FQ,RQ') * model.Cq
+    Aq .= dfg .* dλdH * dHdq
+
+    FY = [zeros(ix,iu);zeros(iψ,iu);model.dynamics.Dμu]
+    RY = [I(ix) zeros(ix,iψ) zeros(ix,iμ)]
+    dHdy = kron(RY',FY) + kron(FY,RY') * model.Cy
+    Sy .= dfg .* dλdH * dHdy
+
+    FZ = [I(ix);zeros(iψ,ix);zeros(iμ,ix)]
+    dHdz = kron(FZ,FZ)
+    Sz .= dfg .* dλdH * (-dHdz)
+
+    N11 = zeros(iμ,iμ)
+    N22 =  θ .* Matrix{Float64}(I, iψ, iψ)
+    LMI11 = zeros(ix,ix)
+    LMI21 = N22 * model.dynamics.G'
+    LMI22 = -N22
+    LMI31 = zeros(iμ,ix)
+    LMI32 = zeros(iμ,iψ)
+    LMI33 = -N11
+    LMI = [LMI11 LMI21' LMI31';
+        LMI21 LMI22 LMI32';
+        LMI31 LMI32 LMI33
+    ]
+    dHdb = vec(LMI)
+    Sb .= dfg .* dλdH * dHdb
+
+    return Aq,Sy,Sz,Sb
+end
+
+function diff_numeric(model::FunnelCTCS,q::Vector, y::Vector,z::Vector,b::Float64)
+    iq = size(q,1)
+    iy = size(y,1)
+    iz = size(z,1)
+
+    Aq = zeros(model.is,iq)
+    Sy = zeros(model.is,iy)
+    Sz = zeros(model.is,iq)
+    Sb = zeros(model.is,1)
+
+    h = 1e-8
+    eps_q = Matrix{Float64}(I,iq,iq)
+    for i in 1:iq
+        Aq[:,i] .= (
+        forward(model,q+h*eps_q[:,i],y,z,b) -
+        forward(model,q-h*eps_q[:,i],y,z,b)
+        ) / (2*h)
+    end
+
+    eps_y = Matrix{Float64}(I,iy,iy)
+    for i in 1:iy
+        Sy[:,i] .= (
+        forward(model,q,y+h*eps_y[:,i],z,b) -
+        forward(model,q,y-h*eps_y[:,i],z,b)
+        ) / (2*h)
+    end
+
+    eps_z = Matrix{Float64}(I,iz,iz)
+    for i in 1:iz
+        Sz[:,i] .= (
+        forward(model,q,y,z+h*eps_z[:,i],b) -
+        forward(model,q,y,z-h*eps_z[:,i],b)
+        ) / (2*h)
+    end
+
+    Sb[:,1] .= (
+        forward(model,q,y,z,b+h) -
+        forward(model,q,y,z,b-h)
+        ) / (2*h)
+    return Aq,Sy,Sz,Sb
+end
+
 
 function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTCS,
     x::Matrix,u::Matrix,T::Vector,
-    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3})
+    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3},b::Vector)
     # Q,Y,Z are unnecessary for linear DLMI, but keep them here for writing nonlinearDLMI later
     @assert size(x,2) == size(Q,3)
     @assert size(x,2) + 1 == size(u,2)
@@ -86,6 +270,8 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
     idx_Syp = get_interval(idx_Sym[end]+1,is*iy)
     idx_Szm = get_interval(idx_Syp[end]+1,is*iq)
     idx_Szp = get_interval(idx_Szm[end]+1,is*iq)
+    idx_Sbm = get_interval(idx_Szp[end]+1,is*1)
+    idx_Sbp = get_interval(idx_Sbm[end]+1,is*1)
 
     function dvdt(out,V,p,t)
         um = p[1]
@@ -94,7 +280,9 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         yp = p[4]
         zm = p[5]
         zp = p[6]
-        dt = p[7]
+        bm = p[7]
+        bp = p[8]
+        dt = p[9]
 
         alpha = (dt - t) / dt
         beta = t / dt
@@ -102,6 +290,7 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         u_ = alpha * um + beta * up
         y_ = alpha * ym + beta * yp
         z_ = alpha * zm + beta * zp
+        b_ = alpha * bm + beta * bp
 
         x_ = V[idx_x]
         q_ = V[idx_q]
@@ -117,6 +306,8 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         Syp_ = reshape(V[idx_Syp],(is,iy))
         Szm_ = reshape(V[idx_Szm],(is,iq))
         Szp_ = reshape(V[idx_Szp],(is,iq))
+        Sbm_ = reshape(V[idx_Sbm],(is,1))
+        Sbp_ = reshape(V[idx_Sbp],(is,1))
 
         # traj terms
         f = forward(dynamics,x_,u_)
@@ -125,11 +316,8 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         F = forward(model,q_,y_,z_,A,B)
         dAq,dBy,dBz = diff(model,A,B)
         # ctcs terms
-        ds = forward(ctcs,q_,y_,z_)
-        dSq,dSy,dSz = diff(ctcs,q_,y_,z_)
-        # print_jl(dSq)
-        # print_jl(Bym_)
-        # print_jl(dSy)
+        ds = forward(ctcs,q_,y_,z_,b_)
+        dSq,dSy,dSz,dSb = diff(ctcs,q_,y_,z_,b_)
 
         dxdt = f
         dqdt = F
@@ -138,17 +326,20 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         dBypdt = dAq*Byp_ + dBy.*beta
         dBzmdt = dAq*Bzm_ + dBz.*alpha
         dBzpdt = dAq*Bzp_ + dBz.*beta
+        
         dsdt = ds
         dSqdt = dSq*Phi
         dSymdt = dSq*Bym_ + dSy.*alpha
         dSypdt = dSq*Byp_ + dSy.*beta
         dSzmdt = dSq*Bzm_ + dSz.*alpha
         dSzpdt = dSq*Bzp_ + dSz.*beta
-
+        dSbmdt = dSb.*alpha
+        dSbpdt = dSb.*beta
 
         dV = [dxdt;dqdt;
             dAdt[:];dBymdt[:];dBypdt[:];dBzmdt[:];dBzpdt[:];
-            dsdt;dSqdt[:];dSymdt[:];dSypdt[:];dSzmdt[:];dSzpdt[:]]
+            dsdt;dSqdt[:];dSymdt[:];dSypdt[:];dSzmdt[:];dSzpdt[:];
+            dSbmdt[:];dSbpdt[:]]
         out .= dV[:]
     end
 
@@ -163,6 +354,8 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
     Syp = zeros(is,iy,N)
     Szm = zeros(is,iq,N)
     Szp = zeros(is,iq,N)
+    Sbm = zeros(is,1,N)
+    Sbp = zeros(is,1,N)
     SZ = zeros(is,N)
 
     x_prop = zeros(ix,N)
@@ -180,8 +373,10 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         Syp0 = zeros(is,iy)
         Szm0 = zeros(is,iq)
         Szp0 = zeros(is,iq)
+        Sbm0 = zeros(is,1)
+        Sbp0 = zeros(is,1)
         V0 = [x[:,i];vec(Q[:,:,i]);A0[:];Bym0[:];Byp0[:];Bzm0[:];Bzp0[:];
-            zeros(is);S0[:];Sym0[:];Syp0[:];Szm0[:];Szp0[:]][:]
+            zeros(is);S0[:];Sym0[:];Syp0[:];Szm0[:];Szp0[:];Sbm0[:];Sbp0[:]][:]
 
         um = u[:,i]
         up = u[:,i+1]
@@ -189,9 +384,11 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         yp = vec(Y[:,:,i+1])
         zm = vec(Z[:,:,i])
         zp = vec(Z[:,:,i+1])
+        bm = b[i]
+        bp = b[i+1]
         dt = T[i]
 
-        t, sol = RK4(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt),50)
+        t, sol = RK4(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,bm,bp,dt),50)
         x_prop[:,i] .= sol[idx_x,end]
         q_prop[:,i] .= sol[idx_q,end]
         Aq[:,:,i] .= reshape(sol[idx_A,end],iq,iq)
@@ -205,11 +402,14 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,ctcs::FunnelCTC
         Syp[:,:,i] .= reshape(sol[idx_Syp,end],is,iy)
         Szm[:,:,i] .= reshape(sol[idx_Szm,end],is,iq)
         Szp[:,:,i] .= reshape(sol[idx_Szp,end],is,iq)
+        Sbm[:,:,i] .= reshape(sol[idx_Sbm,end],is,1)
+        Sbp[:,:,i] .= reshape(sol[idx_Sbp,end],is,1)
         SZ[:,i] .= (s_prop[:,i] - Sq[:,:,i]*vec(Q[:,:,i]) 
             - Sym[:,:,i]*ym - Syp[:,:,i]*yp
-            - Szm[:,:,i]*zm - Szp[:,:,i]*zp)
+            - Szm[:,:,i]*zm - Szp[:,:,i]*zp
+            - Sbm[:,:,i]*bm - Sbp[:,:,i]*bp)
     end
-    return Aq,Bym,Byp,Bzm,Bzp,Sq,Sym,Syp,Szm,Szp,SZ,x_prop,q_prop,s_prop
+    return Aq,Bym,Byp,Bzm,Bzp,Sq,Sym,Syp,Szm,Szp,Sbm,Sbp,SZ,x_prop,q_prop,s_prop
 end
 struct QPDDet <: FunnelCTCS
     epsilon::Float64
