@@ -12,4 +12,4 @@ test_time_delay.ipynb
 test.ipynb
 jump_*
 comparison.ipynb
-/data_image
+/data_image/*.key
