@@ -81,12 +81,14 @@ struct PTR <: SCP
     tol_dyn::Float64  # tolerance for dynamics error
     tr_norm::Any  # choice for trust-region regularization (quadratic, 2-norm, 1-norm..)
     max_iter::Int64  # maximum iteration
+    flag_tf_free::Bool
     verbosity::Bool
 
     function PTR(N::Int, tf::Float64, max_iter::Int,
         dynamics::Dynamics, constraint::Vector{T}, scaling::Scaling,
         w_tf::Float64, w_c::Float64, w_rate::Float64, w_param::Float64, w_vc::Float64, w_tr::Float64,
-        tol_vc::Float64, tol_tr::Float64, tol_dyn::Float64, tr_norm::Any, verbosity::Bool) where T <: Constraint
+        tol_vc::Float64, tol_tr::Float64, tol_dyn::Float64, tr_norm::Any,
+        verbosity::Bool;flag_tf_free::Bool=false) where T <: Constraint
 
         ix = dynamics.ix
         iu = dynamics.iu
@@ -94,11 +96,11 @@ struct PTR <: SCP
 
         return new(dynamics, constraint, scaling, solution, N, tf,
             w_tf, w_c, w_rate, w_param, w_vc, w_tr, tol_tr,
-            tol_vc, tol_dyn, tr_norm, max_iter, verbosity)
+            tol_vc, tol_dyn, tr_norm, max_iter, flag_tf_free, verbosity)
     end
 end
 
-function uniform_fixed!(ptr::PTR,model::Model)
+function uniform_fixed!(ptr::SCP,model::Model)
     N = ptr.N
     S_sigma = ptr.scaling.S_sigma 
     dt = [ptr.tf/N/S_sigma for i in 1:N]
@@ -111,7 +113,7 @@ function uniform_fixed!(ptr::PTR,model::Model)
     return dt
 end
 
-function uniform_mesh!(ptr::PTR,model::Model)
+function uniform_mesh!(ptr::SCP,model::Model)
     N = ptr.N
     @variable(model,Δt)
     dt = [Δt for i in 1:N]
@@ -127,7 +129,7 @@ function uniform_mesh!(ptr::PTR,model::Model)
     return dt
 end
 
-function nonuniform_mesh!(ptr::PTR,model::Model)
+function nonuniform_mesh!(ptr::SCP,model::Model)
     N = ptr.N
     @variable(model,dt[1:N])
     S_sigma = ptr.scaling.S_sigma 
@@ -175,8 +177,11 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     @variable(model, vc_t[1:N])
 
     # constraints on dt
-    dt = uniform_fixed!(ptr,model)
-    # dt = uniform_mesh!(ptr,model)
+    if ptr.flag_tf_free == true
+        dt = uniform_mesh!(ptr,model)
+    else
+        dt = uniform_fixed!(ptr,model)
+    end
     # println(model)
 
     # scale reference trajectory
@@ -250,7 +255,7 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     return value(l_tf),value(l_rate),value(l_vc),value(l_tr),value(l_c),value(l_all)
 end
 
-function run(ptr::PTR,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,solver::Any)
+function run(ptr::SCP,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,solver::Any)
     ptr.solution.x .= x0
     ptr.solution.u .= u0
     ptr.solution.dt .= dt0

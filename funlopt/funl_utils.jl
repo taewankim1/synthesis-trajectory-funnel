@@ -90,8 +90,14 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         up = u[:,i+1]
         ym = vec(Y[:,:,i])
         yp = vec(Y[:,:,i+1])
-        zm = vec(Z[:,:,i])
-        zp = vec(Z[:,:,i+1])
+        zm = vec(Z[1:ix,:,i])
+        if typeof(model) == LinearFOH
+            zp = vec(Z[:,:,i])
+        elseif typeof(model) == LinearSOH
+            zp = vec(Z[ix+1:2*ix,:,i])
+        else
+            zp = vec(Z[:,:,i+1])
+        end
         dt = T[i]
 
         prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt))
@@ -138,4 +144,3 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     end
     return Qfwd,tprop,xprop,uprop,Qprop,Yprop,Zprop
 end
-

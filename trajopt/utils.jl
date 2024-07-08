@@ -1,7 +1,7 @@
 using Interpolations
 using LinearAlgebra
 # using Plots
-using PyPlot
+# using PyPlot
 using DifferentialEquations
 function print_jl(x,flag_val = false)
     println("Type is $(typeof(x))")

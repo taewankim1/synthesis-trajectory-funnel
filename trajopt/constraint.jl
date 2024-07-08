@@ -120,9 +120,64 @@ end
 function initial_condition!(dynamics::Dynamics,model::Model,x1::Vector,xi::Vector)
     @constraint(model,x1 == xi)
 end
-function final_condition!(dynamics::Unicycle,model::Model,xN::Vector,xf::Vector)
+function final_condition!(dynamics::Dynamics,model::Model,xN::Vector,xf::Vector)
     @constraint(model,xN == xf)
 end
 function final_condition!(dynamics::Rocket,model::Model,xN::Vector,xf::Vector)
     @constraint(model,xN[2:dynamics.ix] == xf[2:dynamics.ix])
+end
+
+struct ThreeDOFManipulatorConstraint <: Constraint
+    tau_max::Float64
+    dq_max::Float64
+    function ThreeDOFManipulatorConstraint(tau_max::Float64,dq_max::Float64)
+        new(tau_max,dq_max)
+    end
+end
+
+function impose!(constraint::ThreeDOFManipulatorConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing])
+    q1 = x[1]
+    q2 = x[2]
+    q3 = x[3]
+    q1bar = xbar[1]
+    q2bar = xbar[2]
+    q3bar = xbar[3]
+
+    dq1 = x[4]
+    dq2 = x[5]
+    dq3 = x[6]
+    dq1bar = xbar[4]
+    dq2bar = xbar[5]
+    dq3bar = xbar[6]
+
+    tau1 = u[1]
+    tau2 = u[2]
+    tau3 = u[3]
+
+    @constraint(model, q1 <= pi)
+    @constraint(model, q2 <= pi)
+    @constraint(model, q3 <= pi)
+    @constraint(model, - q1 <= pi)
+    @constraint(model, - q2 <= pi)
+    @constraint(model,  - q3 <= pi)
+
+    @constraint(model, dq1 <= constraint.dq_max)
+    @constraint(model, dq2 <= constraint.dq_max)
+    @constraint(model, dq3 <= constraint.dq_max)
+    @constraint(model, - dq1 <= constraint.dq_max)
+    @constraint(model, - dq2 <= constraint.dq_max)
+    @constraint(model,  - dq3 <= constraint.dq_max)
+
+    @constraint(model, tau1 <= constraint.tau_max)
+    @constraint(model, tau2 <= constraint.tau_max)
+    @constraint(model, tau3 <= constraint.tau_max)
+    @constraint(model, - tau1 <= constraint.tau_max)
+    @constraint(model, - tau2 <= constraint.tau_max)
+    @constraint(model, - tau3 <= constraint.tau_max)
+    # @constraint(model, abs(dq1) <= pi)
+    # @constraint(model, abs(dq2) <= pi)
+    # @constraint(model, abs(dq3) <= pi)
+
+    # x3 = dynamics.l1 .* cos.(q1) + dynamics.l2 .* cos.(q1+q2) + dynamics.l3 .* cos.(q1+q2+q3)
+    # y3 = dynamics.l1 .* sin.(q1) + dynamics.l2 .* sin.(q1+q2) + dynamics.l3 .* sin.(q1+q2+q3)
 end

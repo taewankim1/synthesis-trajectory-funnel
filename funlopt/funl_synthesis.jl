@@ -54,11 +54,11 @@ mutable struct FunnelSolution
     # bounded disturbance
     # uncertainty
 
-    function FunnelSolution(N::Int64,ix::Int64,iu::Int64,iq::Int64,iy::Int64)
+    function FunnelSolution(N::Int64,ix::Int64,iu::Int64,iq::Int64,iy::Int64,iz::Int64)
         Q = zeros(ix,ix,N+1)
         K = zeros(iu,ix,N+1)
         Y = zeros(iu,Int64(iy/iu),N+1)
-        Z = zeros(ix,ix,N+1)
+        Z = zeros(iz,ix,N+1)
         b = ones(N+1)
         θ = 0.5
 
@@ -104,7 +104,12 @@ struct FunnelSynthesis
         iu = dynamics.iu
         iq = funl_dynamics.iq
         iy = funl_dynamics.iy
-        solution = FunnelSolution(N,ix,iu,iq,iy)
+        if typeof(funl_dynamics) == LinearSOH
+            iz = 2*ix
+        else
+            iz = ix
+        end
+        solution = FunnelSolution(N,ix,iu,iq,iy,iz)
         if funl_ctcs === nothing
             println(flag_type," funnel and CTCS is ignored")
         else
@@ -116,31 +121,59 @@ struct FunnelSynthesis
     end
 end
 
-function LMILsmooth!(fs,model::Model,Q::Matrix,Y::Matrix,Z::Matrix,b::Any,idx::Int64,iteration::Int64)
+function get_block_LMI(fs,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
     θ = fs.solution.θ
-    iψ = fs.dynamics.iψ
     iμ = fs.dynamics.iμ
+    iψ = fs.dynamics.iψ
 
+
+    if typeof(fs.funl_dynamics) == LinearFOH || typeof(fs.funl_dynamics) == LinearSOH
+        Ai,Bi = diff(fs.dynamics,xi,ui)
+        Aj,Bj = diff(fs.dynamics,xj,uj)
+        Wij = Ai*Qj + Qj'*Ai' + Bi*Yj + Yj'*Bi' + 0.5*fs.funl_dynamics.alpha*(Qj+Qj') - Z
+        Wji = Aj*Qi + Qi'*Aj' + Bj*Yi + Yi'*Bj' + 0.5*fs.funl_dynamics.alpha*(Qi+Qi') - Z
+    elseif typeof(fs.funl_dynamics) == LinearDLMI
+        Wij = - Z
+        Wji = - Z
+    end
+    LMI11 = Wij + Wji
+    if fs.flag_type == "Linear"
+        return LMI11
+    end
+    N11 = diagm(θ ./ ( fs.dynamics.β .* fs.dynamics.β))
+    N22i =  bi * θ .* Matrix{Float64}(I, iψ, iψ)
+    N22j =  bj * θ .* Matrix{Float64}(I, iψ, iψ)
+    LMI21 = (N22i+N22j) * fs.dynamics.G'
+    LMI22 = -(N22i+N22j)
+    LMI31i = fs.dynamics.Cμ * Qi + fs.dynamics.Dμu * Yi
+    LMI31j = fs.dynamics.Cμ * Qj + fs.dynamics.Dμu * Yj
+    LMI31 = LMI31i + LMI31j
+    LMI32 = 2*zeros(iμ,iψ)
+    LMI33 = -2*N11
+    LMI = 0.5 * [LMI11 LMI21' LMI31';
+        LMI21 LMI22 LMI32';
+        LMI31 LMI32 LMI33
+    ]
+    return LMI
+end
+
+function get_b_LMI(fs,Q,Y,b)
     tmp12 = fs.dynamics.Cv*Q + fs.dynamics.Dvu*Y
     Bound_b = [b * I(fs.dynamics.iv) tmp12;
         tmp12' Q
     ]
-    @constraint(model, 0 <= Bound_b, PSDCone())
-    N11 = diagm(θ ./ ( fs.dynamics.β .* fs.dynamics.β))
-    N22 =  b * θ .* Matrix{Float64}(I, iψ, iψ)
-    LMI11 = -Z
-    LMI21 = N22 * fs.dynamics.G'
-    LMI22 = -N22
-    LMI31 = fs.dynamics.Cμ * Q + fs.dynamics.Dμu * Y
-    LMI32 = zeros(iμ,iψ)
-    LMI33 = -N11
-    LMI = [LMI11 LMI21' LMI31';
-        LMI21 LMI22 LMI32';
-        LMI31 LMI32 LMI33
-    ]
-    # iH = size(LMI,1)
+    return Bound_b
+end
+
+function block_LMIs!(fs,model::Model,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
+    LMI = get_block_LMI(fs,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
     @constraint(model, LMI <= 0, PSDCone())
-    # @constraint(model, LMI <= -fs.funl_ctcs.epsilon .* Matrix{Float64}(I,iH,iH), PSDCone())
+    return LMI
+end
+
+function bound_on_b!(fs,model::Model,Q,Y,b)
+    Bound_b = get_b_LMI(fs,Q,Y,b)
+    @constraint(model, 0 <= Bound_b, PSDCone())
 end
 
 function boundary_initial!(fs,model::Model,Q1)
@@ -158,7 +191,7 @@ function funnel_dynamics!(fs,model::Model,Qi,Qip,Yi,Yip,Zi,Zip,i)
 end
 
 function ctcs_dynamics!(fs,model::Model,Qi,Yi,Yip,Zi,Zip,bi,bip,i)
-    @constraint(model, 1e-7*fs.scaling.s_ctcs*ones(fs.funl_ctcs.is) >= fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
+    @constraint(model, 1e-7 .* fs.scaling.s_ctcs*ones(fs.funl_ctcs.is) >= fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
         fs.solution.Sym[:,:,i]*vec(Yi) + fs.solution.Syp[:,:,i]*vec(Yip) +
         fs.solution.Szm[:,:,i]*vec(Zi) + fs.solution.Szp[:,:,i]*vec(Zip) +
         fs.solution.Sbm[:,:,i]*[bi] + fs.solution.Sbp[:,:,i]*[bip] +
@@ -185,7 +218,6 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     Su = fs.scaling.Su
     iSu = fs.scaling.iSu
     
-    @assert(typeof(fs.funl_dynamics) == LinearDLMI)
     Sr = Sx
     iSr = iSx
     ir = ix
@@ -208,9 +240,29 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     for i in 1:(N+1)
         push!(Qcvx, @variable(model, [1:ix, 1:ix], PSD))
         push!(Ycvx, @variable(model, [1:iu, 1:ir]))
-        push!(Zcvx, @variable(model, [1:ix, 1:ix]))
+        if typeof(fs.funl_dynamics) == LinearDLMI
+            push!(Zcvx, @variable(model, [1:ix, 1:ix], PSD))
+        elseif typeof(fs.funl_dynamics) == LinearSOH
+            Z1 = @variable(model, [1:ix,1:ix],Symmetric)
+            Z2 = @variable(model, [1:ix,1:ix],Symmetric)
+            push!(Zcvx,[Z1;Z2])
+        elseif typeof(fs.funl_dynamics) == LinearFOH
+            push!(Zcvx, @variable(model, [1:ix, 1:ix], Symmetric))
+        end
     end
     @variable(model, bcvx[1:N+1])
+
+    # constraint for linearSOH
+    if typeof(fs.funl_dynamics) == LinearFOH
+        @constraint(model, Zcvx[N] .== Zcvx[N+1])
+    elseif typeof(fs.funl_dynamics) == LinearSOH
+        @constraint(model, Zcvx[N][ix+1:2*ix,:] .== Zcvx[N+1][1:ix,:])
+        @constraint(model, Zcvx[N][ix+1:2*ix,:] .== Zcvx[N+1][ix+1:2*ix,:])
+        for i in 1:N
+            @constraint(model, Zcvx[i][1:ix,:] >= Zcvx[i][ix+1:2*ix,:], PSDCone())
+            # @constraint(model, Zcvx[i] >= Zpcvx[i], PSDCone())
+        end
+    end
 
     # parameter
     θ = fs.solution.θ
@@ -224,12 +276,22 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     # scale reference trajectory
     Qbar_scaled = zeros(ix,ix,N+1)
     Ybar_scaled = zeros(iu,ir,N+1)
-    Zbar_scaled = zeros(ix,ix,N+1)
+    if typeof(fs.funl_dynamics) == LinearSOH
+        Zbar_scaled = zeros(2*ix,ix,N+1)
+    else
+        Zbar_scaled = zeros(ix,ix,N+1)
+    end
     bbar_scaled = zeros(N+1)
+
     for i in 1:N+1
         Qbar_scaled[:,:,i] .= iSx*fs.solution.Q[:,:,i]*iSx
         Ybar_scaled[:,:,i] .= iSu*fs.solution.Y[:,:,i]*iSr
-        Zbar_scaled[:,:,i] .= iSx*fs.solution.Z[:,:,i]*iSx
+        if typeof(fs.funl_dynamics) == LinearSOH
+            Zbar_scaled[1:ix,:,i] .= iSx*fs.solution.Z[1:ix,:,i]*iSx
+            Zbar_scaled[ix+1:2*ix,:,i] .= iSx*fs.solution.Z[ix+1:2*ix,:,i]*iSx
+        else
+            Zbar_scaled[:,:,i] .= iSx*fs.solution.Z[:,:,i]*iSx
+        end
     end
     bbar_scaled .= fs.solution.b
 
@@ -240,13 +302,21 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     for i in 1:N+1
         Qi = Sx*Qcvx[i]*Sx
         Yi = Su*Ycvx[i]*Sr
-        Zi = Sx*Zcvx[i]*Sx
+        Zi = Sx*Zcvx[i][1:ix,:]*Sx
         bi = bcvx[i]
+        xi = xnom[:,i]
+        ui = unom[:,i]
         if i <= N
             Qip = Sx*Qcvx[i+1]*Sx
             Yip = Su*Ycvx[i+1]*Sr
-            Zip = Sx*Zcvx[i+1]*Sx
+            if typeof(fs.funl_dynamics) == LinearSOH
+                Zip = Sx*Zcvx[i][ix+1:2*ix,:]*Sx
+            else
+                Zip = Sx*Zcvx[i+1]*Sx
+            end
             bip = bcvx[i+1]
+            xip = xnom[:,i+1]
+            uip = unom[:,i+1]
         end
 
         # Funnel dynamics
@@ -260,10 +330,25 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
         end
 
         # Lyapunov condition
-        if fs.flag_type == "Linear"
-            @constraint(model, 0 <= Zcvx[i], PSDCone())
-        elseif fs.flag_type == "Lsmooth"
-            LMILsmooth!(fs,model,Qi,Yi,Zi,bi,i,iteration)
+        if typeof(fs.funl_dynamics) == LinearFOH
+            bound_on_b!(fs,model,Qi,Yi,bi)
+            block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui) # pointwise
+            if i <= N
+            #     block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui)
+            #     block_LMIs!(fs,model::Model,Qi,Qip,Yi,Yip,Zi,bi,bip,xi,ui,xip,uip)
+                block_LMIs!(fs,model::Model,Qip,Qip,Yip,Yip,Zi,bip,bip,xip,uip,xip,uip)
+            end
+        elseif typeof(fs.funl_dynamics) == LinearSOH
+            bound_on_b!(fs,model,Qi,Yi,bi)
+            block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui) # pointwise
+            if i <= N
+                block_LMIs!(fs,model::Model,Qip,Qip,Yip,Yip,Zip,bip,bip,xip,uip,xip,uip)
+            end
+        elseif typeof(fs.funl_dynamics) == LinearDLMI
+            bound_on_b!(fs,model,Qi,Yi,bi)
+            block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui) # pointwise
+        else
+            error("choose appropriate funnel dynamics")
         end
 
         # constraints
@@ -300,7 +385,12 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     for i in 1:N+1
         fs.solution.Q[:,:,i] .= Sx*value.(Qcvx[i])*Sx
         fs.solution.Y[:,:,i] .= Su*value.(Ycvx[i])*Sr
-        fs.solution.Z[:,:,i] .= Sx*value.(Zcvx[i])*Sx
+        if typeof(fs.funl_dynamics) == LinearSOH
+            fs.solution.Z[1:ix,:,i] .= Sx*value.(Zcvx[i][1:ix,:])*Sx
+            fs.solution.Z[ix+1:2*ix,:,i] .= Sx*value.(Zcvx[i][ix+1:2*ix,:])*Sx
+        else
+            fs.solution.Z[:,:,i] .= Sx*value.(Zcvx[i])*Sx
+        end
     end
     fs.solution.b = value.(bcvx)
 
