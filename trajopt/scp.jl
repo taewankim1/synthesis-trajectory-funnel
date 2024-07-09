@@ -8,7 +8,9 @@
 using LinearAlgebra
 using Printf
 using JuMP
-# import Gurobi
+using MosekTools
+using Clarabel
+using Gurobi
 
 mutable struct Solution
     x::Matrix{Float64}
@@ -81,14 +83,14 @@ struct PTR <: SCP
     tol_dyn::Float64  # tolerance for dynamics error
     tr_norm::Any  # choice for trust-region regularization (quadratic, 2-norm, 1-norm..)
     max_iter::Int64  # maximum iteration
-    flag_tf_free::Bool
+    type_tf_free::String
     verbosity::Bool
 
     function PTR(N::Int, tf::Float64, max_iter::Int,
         dynamics::Dynamics, constraint::Vector{T}, scaling::Scaling,
         w_tf::Float64, w_c::Float64, w_rate::Float64, w_param::Float64, w_vc::Float64, w_tr::Float64,
         tol_vc::Float64, tol_tr::Float64, tol_dyn::Float64, tr_norm::Any,
-        verbosity::Bool;flag_tf_free::Bool=false) where T <: Constraint
+        verbosity::Bool;type_tf_free::String="tf_fixed") where T <: Constraint
 
         ix = dynamics.ix
         iu = dynamics.iu
@@ -96,7 +98,7 @@ struct PTR <: SCP
 
         return new(dynamics, constraint, scaling, solution, N, tf,
             w_tf, w_c, w_rate, w_param, w_vc, w_tr, tol_tr,
-            tol_vc, tol_dyn, tr_norm, max_iter, flag_tf_free, verbosity)
+            tol_vc, tol_dyn, tr_norm, max_iter, type_tf_free, verbosity)
     end
 end
 
@@ -129,6 +131,29 @@ function uniform_mesh!(ptr::SCP,model::Model)
     return dt
 end
 
+function uniform_two_phase!(ptr::SCP,model::Model)
+    N = ptr.N
+    N1 = ptr.constraint[end].N1 # assume the multiphase constraint given as the last element
+    N2 = ptr.constraint[end].N2
+    @assert(N == N1 + N2)
+    @variable(model,Δt1)
+    @variable(model,Δt2)
+    dt1 = [Δt1 for i in 1:N1]
+    dt2 = [Δt2 for i in 1:N2]
+    dt = vcat(dt1,dt2)
+
+    S_sigma = ptr.scaling.S_sigma 
+    min_dt = ptr.scaling.min_dt
+    max_dt = ptr.scaling.max_dt
+
+    for Δt in [Δt1,Δt2]
+        @constraint(model,S_sigma*Δt >= 0)
+        @constraint(model,S_sigma*Δt >= min_dt)
+        @constraint(model,S_sigma*Δt <= max_dt)
+    end
+    return dt
+end
+
 function nonuniform_mesh!(ptr::SCP,model::Model)
     N = ptr.N
     @variable(model,dt[1:N])
@@ -144,7 +169,7 @@ function nonuniform_mesh!(ptr::SCP,model::Model)
     return dt
 end
 
-function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
+function cvxopt(ptr::PTR,solver::Any,solver_env::Any)
     ix = ptr.dynamics.ix
     iu = ptr.dynamics.iu
     N = ptr.N
@@ -162,12 +187,18 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     S_sigma = ptr.scaling.S_sigma
 
     # cvx model
-    if solver_env != nothing
-        model = Model(() -> solver.Optimizer(solver_env))
+    if solver == "Mosek"
+        model = Model(Mosek.Optimizer)
+        set_optimizer_attribute(model, "MSK_IPAR_LOG", 0) # Turn off verbosity for Mosek
+    elseif solver == "Clarabel"
+        model = Model(Clarabel.Optimizer)
+        set_optimizer_attribute(model, "verbose", false) # Turn off verbosity for Mosek
+    elseif solver == "Gurobi"
+        model = Model(() -> Gurobi.Optimizer(solver_env))
+        set_optimizer_attribute(model, "OutputFlag", 0)
     else
-        model = Model(() -> solver.Optimizer())
+        println("You should select Mosek, Clarabel, Gurobi")
     end
-    set_optimizer_attribute(model, "OutputFlag", 0)
     # println(typeof(model))
 
     # cvx variables (scaled)
@@ -177,10 +208,12 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     @variable(model, vc_t[1:N])
 
     # constraints on dt
-    if ptr.flag_tf_free == true
+    if ptr.type_tf_free == "tf_free"
         dt = uniform_mesh!(ptr,model)
-    else
+    elseif ptr.type_tf_free == "tf_fixed"
         dt = uniform_fixed!(ptr,model)
+    elseif ptr.type_tf_free == "two_phase"
+        dt = uniform_two_phase!(ptr,model)
     end
     # println(model)
 
@@ -205,7 +238,7 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     N_constraint = size(ptr.constraint,1)
     for i in 1:N+1
         for j in 1:N_constraint
-            impose!(ptr.constraint[j],model,Sx*xcvx[:,i]+sx,Su*ucvx[:,i]+su,xbar[:,i],ubar[:,i])
+            impose!(ptr.constraint[j],model,Sx*xcvx[:,i]+sx,Su*ucvx[:,i]+su,xbar[:,i],ubar[:,i],idx=i)
         end
     end
 
@@ -255,7 +288,7 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any=nothing)
     return value(l_tf),value(l_rate),value(l_vc),value(l_tr),value(l_c),value(l_all)
 end
 
-function run(ptr::SCP,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,solver::Any)
+function run(ptr::SCP,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,solver::String)
     ptr.solution.x .= x0
     ptr.solution.u .= u0
     ptr.solution.dt .= dt0
@@ -267,9 +300,11 @@ function run(ptr::SCP,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,so
     iu = ptr.dynamics.iu
     N = ptr.N
 
-
-    # temporary
-    gurobi_env = solver.Env()
+    if solver == "Gurobi"
+        solver_env = Gurobi.Env()
+    else
+        solver_env = nothing
+    end
 
     for iteration in 1:ptr.max_iter
         # discretization & linearization
@@ -277,7 +312,7 @@ function run(ptr::SCP,x0::Matrix,u0::Matrix,dt0::Vector,xi::Vector,xf::Vector,so
             ptr.solution.x[:,1:N],ptr.solution.u,ptr.solution.dt)
         
         # solve subproblem
-        c_tf,c_rate,c_vc,c_tr,c_input,c_all = cvxopt(ptr,solver,gurobi_env);
+        c_tf,c_rate,c_vc,c_tr,c_input,c_all = cvxopt(ptr,solver,solver_env);
 
         # multiple shooting
         xfwd,ptr.solution.tprop,ptr.solution.xprop = propagate_multiple_FOH(ptr.dynamics,ptr.solution.x,ptr.solution.u,ptr.solution.dt)

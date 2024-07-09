@@ -26,7 +26,7 @@ struct Obstacle <: Constraint
     end
 end
 
-function impose!(constraint::Obstacle,model::Model,x::Vector,u::Vector,xbar::Vector,ubar::Vector=[nothing])
+function impose!(constraint::Obstacle,model::Model,x::Vector,u::Vector,xbar::Vector,ubar::Vector=[nothing];idx::Int=0)
     # ||H(r-c)|| >= 1
 
     # obstacle parameters
@@ -76,7 +76,7 @@ struct PDG <: Constraint
     end
 end
 
-function impose!(pdg::PDG,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing])
+function impose!(pdg::PDG,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
     # m rx ry rz vx vy vz roll pitch yaw wx wy wz
     # 1  2  3  4  5  6  7 . 8 . 9    10  11 12 13
     # mass
@@ -135,7 +135,7 @@ struct ThreeDOFManipulatorConstraint <: Constraint
     end
 end
 
-function impose!(constraint::ThreeDOFManipulatorConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing])
+function impose!(constraint::ThreeDOFManipulatorConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
     q1 = x[1]
     q2 = x[2]
     q3 = x[3]
@@ -174,10 +174,57 @@ function impose!(constraint::ThreeDOFManipulatorConstraint,model::Model,x::Vecto
     @constraint(model, - tau1 <= constraint.tau_max)
     @constraint(model, - tau2 <= constraint.tau_max)
     @constraint(model, - tau3 <= constraint.tau_max)
-    # @constraint(model, abs(dq1) <= pi)
-    # @constraint(model, abs(dq2) <= pi)
-    # @constraint(model, abs(dq3) <= pi)
+end
 
-    # x3 = dynamics.l1 .* cos.(q1) + dynamics.l2 .* cos.(q1+q2) + dynamics.l3 .* cos.(q1+q2+q3)
-    # y3 = dynamics.l1 .* sin.(q1) + dynamics.l2 .* sin.(q1+q2) + dynamics.l3 .* sin.(q1+q2+q3)
+struct ThreeDOFManipulatorMultiphaseConstraint <: Constraint
+    N1::Int64
+    N2::Int64
+    l1::Float64
+    l2::Float64
+    l3::Float64
+    function ThreeDOFManipulatorMultiphaseConstraint(N::Int,l1::Float64,l2::Float64,l3::Float64)
+        N1 = Int(ceil(N*0.5))
+        N2 = N - N1
+        new(N1,N2,l1,l2,l3)
+    end
+end
+
+function impose!(constraint::ThreeDOFManipulatorMultiphaseConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
+    xf = zeros(3)
+    xf[1] = - pi/3
+    xf[2] = 2 * pi / 3
+    xf[3] = - pi / 3
+    # x3bar
+    l1 = constraint.l1
+    l2 = constraint.l2
+    l3 = constraint.l3
+    q1_bar = xbar[1]
+    q2_bar = xbar[2]
+    q3_bar = xbar[3]
+
+    x3_bar = l1 * cos(q1_bar) + l2 * cos(q1_bar+q2_bar) + l3 * cos(q1_bar+q2_bar+q3_bar)
+    y3_bar = l1 * sin(q1_bar) + l2 * sin(q1_bar+q2_bar) + l3 * sin(q1_bar+q2_bar+q3_bar)
+
+    J = zeros(2,3)
+    J[1,1] = -l1*sin(q1_bar) - l2*sin(q1_bar + q2_bar) - l3*sin(q1_bar + q2_bar + q3_bar)
+    J[1,2] = -l2*sin(q1_bar + q2_bar) - l3*sin(q1_bar + q2_bar + q3_bar)
+    J[1,3] = -l3*sin(q1_bar + q2_bar + q3_bar)
+    J[2,1] = l1*cos(q1_bar) + l2*cos(q1_bar + q2_bar) + l3*cos(q1_bar + q2_bar + q3_bar)
+    J[2,2] = l2*cos(q1_bar + q2_bar) + l3*cos(q1_bar + q2_bar + q3_bar)
+    J[2,3] = l3*cos(q1_bar + q2_bar + q3_bar)
+
+    if (idx == constraint.N1 + 1)
+        @constraint(model,x[1:3] == xf)
+        @constraint(model,x[4:6] == zeros(3))
+    end
+    if (idx < constraint.N1 + 1)
+        @constraint(model, x3_bar .+ J[1,:]' * (x[1:3].-xbar[1:3]) <= 2.0)
+    end
+    if (idx > constraint.N1 + 1)
+        @constraint(model, 2 * x[1] == - x[2])
+        # @constraint(model, y3_bar .+ J[2,:]' * (x[1:3].-xbar[1:3]) == 0.0)
+        # @constraint(model, y3_bar .+ J[2,:]' * (x[1:3].-xbar[1:3]) >= - 0.1)
+        @constraint(model,sum(x[1:3]) == 0.0)
+    end
+
 end
