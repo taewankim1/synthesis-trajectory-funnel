@@ -122,11 +122,6 @@ struct FunnelSynthesis
 end
 
 function get_block_LMI(fs,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
-    θ = fs.solution.θ
-    iμ = fs.dynamics.iμ
-    iψ = fs.dynamics.iψ
-
-
     if typeof(fs.funl_dynamics) == LinearFOH || typeof(fs.funl_dynamics) == LinearSOH
         Ai,Bi = diff(fs.dynamics,xi,ui)
         Aj,Bj = diff(fs.dynamics,xj,uj)
@@ -140,6 +135,9 @@ function get_block_LMI(fs,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
     if fs.flag_type == "Linear"
         return LMI11
     end
+    θ = fs.solution.θ
+    iμ = fs.dynamics.iμ
+    iψ = fs.dynamics.iψ
     N11 = diagm(θ ./ ( fs.dynamics.β .* fs.dynamics.β))
     N22i =  bi * θ .* Matrix{Float64}(I, iψ, iψ)
     N22j =  bj * θ .* Matrix{Float64}(I, iψ, iψ)
@@ -172,8 +170,10 @@ function block_LMIs!(fs,model::Model,Qi,Qj,Yi,Yj,Z,bi,bj,xi,ui,xj,uj)
 end
 
 function bound_on_b!(fs,model::Model,Q,Y,b)
-    Bound_b = get_b_LMI(fs,Q,Y,b)
-    @constraint(model, 0 <= Bound_b, PSDCone())
+    if fs.flag_type != "Linear"
+        Bound_b = get_b_LMI(fs,Q,Y,b)
+        @constraint(model, 0 <= Bound_b, PSDCone())
+    end
 end
 
 function boundary_initial!(fs,model::Model,Q1)
@@ -268,9 +268,9 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     θ = fs.solution.θ
 
     # Q is PD
-    very_small = 1e-5
+    very_small = 1e-4
     for i in 1:N+1
-        @constraint(model, Sx*Qcvx[i]*Sx >= very_small * I(ix), PSDCone())
+        @constraint(model, Sx*Qcvx[i]*Sx >= very_small .* Matrix(1.0I,ix,ix), PSDCone())
     end
 
     # scale reference trajectory
@@ -334,8 +334,7 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
             bound_on_b!(fs,model,Qi,Yi,bi)
             block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui) # pointwise
             if i <= N
-            #     block_LMIs!(fs,model::Model,Qi,Qi,Yi,Yi,Zi,bi,bi,xi,ui,xi,ui)
-            #     block_LMIs!(fs,model::Model,Qi,Qip,Yi,Yip,Zi,bi,bip,xi,ui,xip,uip)
+                # block_LMIs!(fs,model::Model,Qi,Qip,Yi,Yip,Zi,bi,bip,xi,ui,xip,uip)
                 block_LMIs!(fs,model::Model,Qip,Qip,Yip,Yip,Zi,bip,bip,xip,uip,xip,uip)
             end
         elseif typeof(fs.funl_dynamics) == LinearSOH

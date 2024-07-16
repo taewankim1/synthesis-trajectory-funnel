@@ -1,7 +1,6 @@
 using Interpolations
 using LinearAlgebra
-# using Plots
-# using PyPlot
+using Plots
 using DifferentialEquations
 function print_jl(x,flag_val = false)
     println("Type is $(typeof(x))")
@@ -9,6 +8,14 @@ function print_jl(x,flag_val = false)
     if flag_val == true
         println("Value is $(x)")
     end
+end
+
+function plot_ellipse(plot,Q::Matrix,xbar::Vector,color;alpha=0.3,label=nothing)
+    θ = range(0, 2pi + 0.05; step = 0.05)
+    x_y = √Q[1:2,1:2] * hcat(cos.(θ), sin.(θ))' .+ xbar[1:2]
+    plot!(plot, x_y[1, :], x_y[2, :], c = color,linewidth=2,label=label)
+    plot!(plot, x_y[1, :], x_y[2, :], label = nothing,fill=true, fillcolor=color,alpha=alpha)
+    plot!(legendfontsize=12)
 end
 
 include("dynamics.jl")

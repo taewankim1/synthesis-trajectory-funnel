@@ -78,7 +78,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     yprop = []
     zprop = []
     Qfwd = zeros(size(Q))
-    Qfwd[:,:,1] = Q[:,:,1]
+    Qfwd[:,:,1] .= Q[:,:,1]
     for i = 1:N
         if flag_single == true
             V0 = [x[:,i];vec(Qfwd[:,:,i])][:]
@@ -101,9 +101,9 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         dt = T[i]
 
         prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt))
-        sol = solve(prob, Tsit5(), reltol=1e-12, abstol=1e-12;verbose=false);
+        sol = solve(prob, Tsit5(), reltol=1e-9, abstol=1e-9;verbose=false);
 
-        tode = sol.t
+        tode = sol.t[1:end-1]
         uode = zeros(iu,size(tode,1))
         yode = zeros(iy,size(tode,1))
         zode = zeros(iq,size(tode,1))
@@ -115,8 +115,8 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
             zode[:,idx] .= alpha * zm + beta * zp
         end
         ode = stack(sol.u)
-        xode = ode[idx_x,:]
-        qode = ode[idx_q,:]
+        xode = ode[idx_x,1:end-1]
+        qode = ode[idx_q,1:end-1]
         if i == 1
             tprop = tode
             xprop = xode
@@ -134,6 +134,13 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         end
         Qfwd[:,:,i+1] = reshape(qode[:,end],(ix,ix))
     end
+    tprop = vcat(tprop,[sum(T[1:N])])
+    xprop = hcat(xprop,x[:,end])
+    uprop = hcat(uprop,u[:,end])
+    qprop = hcat(qprop,vec(Q[:,:,end]))
+    yprop = hcat(yprop,vec(Y[:,:,end]))
+    zprop = hcat(zprop,vec(Z[:,:,end]))
+
     Qprop = zeros(ix,ix,length(tprop))
     Yprop = zeros(iu,Int64(iy/iu),length(tprop))
     Zprop = zeros(ix,ix,length(tprop))
@@ -143,4 +150,119 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         Zprop[:,:,i] .= reshape(zprop[:,i],(ix,ix))
     end
     return Qfwd,tprop,xprop,uprop,Qprop,Yprop,Zprop
+end
+
+function propagate_from_funnel_entry(x0::Vector,model::FunnelDynamics,dynamics::Dynamics,
+    xnom::Matrix,unom::Matrix,Tnom::Vector,
+    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3})
+    N = size(xnom,2) - 1
+    ix = model.ix
+    iu = model.iu
+    iq = model.iq
+    iy = model.iy
+
+    idx_x = 1:ix
+    idx_xnom = ix+1:2*ix
+    idx_q = (2*ix+1):(2*ix+iq)
+
+    function dvdt(out,V,p,t)
+        um = p[1]
+        up = p[2]
+        ym = p[3]
+        yp = p[4]
+        zm = p[5]
+        zp = p[6]
+        dt = p[7]
+        km = p[8]
+        kp = p[9]
+
+        alpha = (dt - t) / dt
+        beta = t / dt
+
+        unom_ = alpha * um + beta * up
+        y_ = alpha * ym + beta * yp
+        z_ = alpha * zm + beta * zp
+        k_ = alpha * km + beta * kp
+
+        x_ = V[idx_x]
+        xnom_ = V[idx_xnom]
+        q_ = V[idx_q]
+
+        Q_ = reshape(q_,(ix,ix))
+        Y_ = reshape(y_,(iu,ix))
+        K_ = Y_ * inv(Q_)
+        # K_ = reshape(k_,(iu,ix))
+
+        u_ = unom_ + K_ * (x_ - xnom_)
+
+        # traj terms
+        f = forward(dynamics,x_,u_)
+        fnom = forward(dynamics,xnom_,unom_)
+        A,B = diff(dynamics,x_,u_)
+        # funl terms
+        F = forward(model,q_,y_,z_,A,B)
+
+        dV = [f;fnom;F]
+        out .= dV[:]
+    end
+
+    xfwd = zeros(size(xnom))
+    xfwd[:,1] .= x0
+    tprop = []
+    xprop = []
+    uprop = []
+    for i = 1:N
+        V0 = [xfwd[:,i];xnom[:,i];vec(Q[:,:,i])][:]
+        um = unom[:,i]
+        up = unom[:,i+1]
+        ym = vec(Y[:,:,i])
+        yp = vec(Y[:,:,i+1])
+        km = vec(Y[:,:,i] * inv(Q[:,:,i]))
+        kp = vec(Y[:,:,i+1] * inv(Q[:,:,i+1]))
+        zm = vec(Z[1:ix,:,i])
+        if typeof(model) == LinearFOH
+            zp = vec(Z[:,:,i])
+        elseif typeof(model) == LinearSOH
+            zp = vec(Z[ix+1:2*ix,:,i])
+        else
+            zp = vec(Z[:,:,i+1])
+        end
+        dt = Tnom[i]
+
+        prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt,km,kp))
+        sol = solve(prob, Tsit5(), reltol=1e-9, abstol=1e-9;verbose=false);
+
+        tode = sol.t
+        ode = stack(sol.u)
+        xode = ode[idx_x,:]
+        xnomode = ode[idx_xnom,:]
+        qode = ode[idx_q,:]
+        uode = zeros(iu,size(tode,1))
+        for idx in 1:length(tode)
+            alpha = (dt - tode[idx]) / dt
+            beta = tode[idx] / dt
+
+            unom_ = alpha * um + beta * up
+            y_ = alpha * ym + beta * yp
+            x_ = xode[:,idx]
+            xnom_ = xnomode[:,idx]
+            q_ = qode[:,idx]
+
+            Q_ = reshape(q_,(ix,ix))
+            Y_ = reshape(y_,(iu,ix))
+            K_ = Y_ * inv(Q_)
+            uode[:,idx] .= unom_ + K_ * (x_ - xnom_)
+        end
+        if i == 1
+            tprop = tode
+            xprop = xode
+            uprop = uode
+        else 
+            tprop = vcat(tprop,sum(Tnom[1:i-1]).+tode)
+            xprop = hcat(xprop,xode)
+            uprop = hcat(uprop,uode)
+        end
+        xfwd[:,i+1] = xode[:,end]
+    end
+    return xfwd,tprop,xprop,uprop
 end

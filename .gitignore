@@ -13,3 +13,5 @@ test.ipynb
 jump_*
 comparison.ipynb
 /data_image/*.key
+/xmls
+*.mp4

@@ -154,6 +154,39 @@ function uniform_two_phase!(ptr::SCP,model::Model)
     return dt
 end
 
+function uniform_five_phase!(ptr::SCP,model::Model)
+    N = ptr.N
+    N1 = ptr.constraint[end].N1 # assume the multiphase constraint given as the last element
+    N2 = ptr.constraint[end].N2
+    N3 = ptr.constraint[end].N3
+    N4 = ptr.constraint[end].N4
+    N5 = ptr.constraint[end].N5
+    N6 = ptr.constraint[end].N6
+    @assert(N + 1 == N6)
+    @variable(model,Δt1)
+    @variable(model,Δt2)
+    @variable(model,Δt3)
+    @variable(model,Δt4)
+    @variable(model,Δt5)
+    dt1 = [Δt1 for i in 1:N2-N1]
+    dt2 = [Δt2 for i in 1:N3-N2]
+    dt3 = [Δt3 for i in 1:N4-N3]
+    dt4 = [Δt4 for i in 1:N5-N4]
+    dt5 = [Δt5 for i in 1:N6-N5]
+    dt = vcat(dt1,dt2,dt3,dt4,dt5)
+
+    S_sigma = ptr.scaling.S_sigma 
+    min_dt = ptr.scaling.min_dt
+    max_dt = ptr.scaling.max_dt
+
+    for Δt in [Δt1,Δt2,Δt3,Δt4,Δt5]
+        @constraint(model,S_sigma*Δt >= 0)
+        @constraint(model,S_sigma*Δt >= min_dt)
+        @constraint(model,S_sigma*Δt <= max_dt)
+    end
+    return dt
+end
+
 function nonuniform_mesh!(ptr::SCP,model::Model)
     N = ptr.N
     @variable(model,dt[1:N])
@@ -214,6 +247,8 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any)
         dt = uniform_fixed!(ptr,model)
     elseif ptr.type_tf_free == "two_phase"
         dt = uniform_two_phase!(ptr,model)
+    elseif ptr.type_tf_free == "five_phase"
+        dt = uniform_five_phase!(ptr,model)
     end
     # println(model)
 
@@ -232,7 +267,7 @@ function cvxopt(ptr::PTR,solver::Any,solver_env::Any)
 
     # initial and boundary
     initial_condition!(ptr.dynamics,model,Sx*xcvx[:,1]+sx,ptr.solution.xi)
-    final_condition!(ptr.dynamics,model,Sx*xcvx[:,N+1]+sx,ptr.solution.xf)
+    final_condition!(ptr.dynamics,model,Sx*xcvx[:,N+1]+sx,ptr.solution.xf,uN=Sx*xcvx[:,N]+sx)
     
     # constraints
     N_constraint = size(ptr.constraint,1)

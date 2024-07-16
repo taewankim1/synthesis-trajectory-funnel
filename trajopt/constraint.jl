@@ -11,7 +11,7 @@ struct InputLinear <: Constraint
     end
 end
 
-function impose!(constraint::InputLinear,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing])
+function impose!(constraint::InputLinear,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
     A = constraint.A
     b = constraint.b
     # return A * u == b
@@ -120,10 +120,10 @@ end
 function initial_condition!(dynamics::Dynamics,model::Model,x1::Vector,xi::Vector)
     @constraint(model,x1 == xi)
 end
-function final_condition!(dynamics::Dynamics,model::Model,xN::Vector,xf::Vector)
+function final_condition!(dynamics::Dynamics,model::Model,xN::Vector,xf::Vector;uN::Vector)
     @constraint(model,xN == xf)
 end
-function final_condition!(dynamics::Rocket,model::Model,xN::Vector,xf::Vector)
+function final_condition!(dynamics::Rocket,model::Model,xN::Vector,xf::Vector;uN::Vector)
     @constraint(model,xN[2:dynamics.ix] == xf[2:dynamics.ix])
 end
 
@@ -133,6 +133,13 @@ struct ThreeDOFManipulatorConstraint <: Constraint
     function ThreeDOFManipulatorConstraint(tau_max::Float64,dq_max::Float64)
         new(tau_max,dq_max)
     end
+end
+
+function final_condition!(dynamics::ThreeDOFManipulatorDynamics,model::Model,xN::Vector,xf::Vector;uN::Vector=nothing)
+    @constraint(model,xN == xf)
+    # if uN !== nothing
+    #     @constraint(model,uN == xf)
+    # end
 end
 
 function impose!(constraint::ThreeDOFManipulatorConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
@@ -228,3 +235,109 @@ function impose!(constraint::ThreeDOFManipulatorMultiphaseConstraint,model::Mode
     end
 
 end
+
+struct QuadrotorConstraint <: Constraint
+    v_max::Float64
+    att_max::Float64
+    att_vel_max::Float64
+    F_max::Float64
+    M_max::Float64
+end
+
+# function final_condition!(dynamics::QuadrotorDynamics,model::Model,xN::Vector,xf::Vector;uN::Vector=nothing)
+#     @constraint(model,xN == xf)
+#     # if uN !== nothing
+#     #     @constraint(model,uN == xf)
+#     # end
+# end
+
+function impose!(constraint::QuadrotorConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
+    # maximum velocity
+    v = x[4:6]
+    @constraint(model,[constraint.v_max;v] in SecondOrderCone())
+
+    # attitude
+    roll = x[7]
+    pitch = x[8]
+    @constraint(model, [roll,-roll] .<= [constraint.att_max;constraint.att_max])
+    @constraint(model, [pitch,-pitch] .<= [constraint.att_max;constraint.att_max])
+
+    # angular velocity
+    w = x[10:12]
+    @constraint(model,[constraint.att_vel_max;w] in SecondOrderCone())
+
+    # Force and moments
+    Fz = u[1]
+    Mx = u[2]
+    My = u[3]
+    Mz = u[4]
+    @constraint(model, Fz >= 0)
+    @constraint(model, Fz <= constraint.F_max)
+    @constraint(model, [Mx,-Mx] .<= [constraint.M_max;constraint.M_max])
+    @constraint(model, [My,-My] .<= [constraint.M_max;constraint.M_max])
+    @constraint(model, [Mz,-Mz] .<= [constraint.M_max;constraint.M_max])
+end
+
+struct QuadrotorMultiphaseConstraint <: Constraint
+    N1::Int64
+    N2::Int64
+    N3::Int64
+    N4::Int64
+    N5::Int64
+    N6::Int64
+    P1::Vector{Float64}
+    P2::Vector{Float64}
+    P3::Vector{Float64}
+    P4::Vector{Float64}
+    P5::Vector{Float64}
+    h::Float64
+    function QuadrotorMultiphaseConstraint(N::Int64,r::Float64,h::Float64)
+        @assert(N % 5 == 0)
+        deviation = div(N,5)
+        N1 = 1
+        N2 = N1 + deviation
+        N3 = N2 + deviation
+        N4 = N3 + deviation
+        N5 = N4 + deviation
+        N6 = N5 + deviation
+        @assert(N6 == N+1)
+
+        angle = 2*pi / 5
+        r = 5
+        theta1 = - pi / 2 - angle / 2
+        theta3 = theta1 + angle
+        theta5 = theta3 + angle
+        theta2 = theta5 + angle
+        theta4 = theta2 + angle
+        theta6 = theta4 + angle
+        P1 = [r * cos(theta1), r * sin(theta1)]
+        P2 = [r * cos(theta2), r * sin(theta2)]
+        P3 = [r * cos(theta3), r * sin(theta3)]
+        P4 = [r * cos(theta4), r * sin(theta4)]
+        P5 = [r * cos(theta5), r * sin(theta5)]
+        P6 = [r * cos(theta6), r * sin(theta6)]
+        @assert(isapprox(P1,P6))
+        new(N1,N2,N3,N4,N5,N6,P1,P2,P3,P4,P5,h)
+    end
+end
+
+function impose!(constraint::QuadrotorMultiphaseConstraint,model::Model,x::Vector,u::Vector,xbar::Vector=[nothing],ubar::Vector=[nothing];idx::Int=0)
+    if(idx == constraint.N1)
+        @constraint(model,x[1:2] == constraint.P1)
+        @constraint(model,x[3] == constraint.h)
+    elseif(idx == constraint.N2)
+        @constraint(model,x[1:2] == constraint.P2)
+        @constraint(model,x[3] == constraint.h)
+    elseif(idx == constraint.N3)
+        @constraint(model,x[1:2] == constraint.P3)
+        @constraint(model,x[3] == constraint.h)
+    elseif(idx == constraint.N4)
+        @constraint(model,x[1:2] == constraint.P4)
+        @constraint(model,x[3] == constraint.h)
+    elseif(idx == constraint.N5)
+        @constraint(model,x[1:2] == constraint.P5)
+        @constraint(model,x[3] == constraint.h)
+    # elseif(idx == N6) # imposed by final boundary condition
+    end
+end
+    
