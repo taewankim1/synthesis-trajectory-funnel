@@ -5,11 +5,7 @@
 # *.ipynb
 *.toml
 /graveyard
-test_IQC.ipynb
-test_LMI.ipynb
-test_SDP.ipynb
-test_time_delay.ipynb
-test.ipynb
+/test/*.ipynb
 jump_*
 comparison.ipynb
 /data_image/*.key

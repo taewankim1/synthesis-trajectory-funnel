@@ -4,6 +4,129 @@ include("../trajopt/discretize.jl")
 include("funl_dynamics.jl")
 using LinearAlgebra
 
+function create_block_diagonal(right::Matrix, n::Int)
+    blocks = [right for _ in 1:n]
+    return BlockDiagonal(blocks)
+end
+
+function get_index_for_upper(n::Int)
+    matrix = reshape([i for i in 1:n^2], n, n)
+    return vec_upper(matrix,n)
+end
+
+function vec_upper(A::Matrix{T},m::Int64) where T
+    v = Vector{T}(undef, div(m*(m+1),2))
+    # v = zeros(m*(m+1))
+    k = 0
+    @inbounds for j in 1:m
+        @inbounds for i = 1:j
+            v[k + i] = A[i,j]
+        end
+        k += j
+    end
+    return v
+end
+
+function mat_upper(v::Vector{T},n::Int64) where {T}
+    M = zeros(T, n, n)
+    @assert size(M, 2) == n
+    @assert length(v) >= n * (n + 1) / 2
+    k = 0
+    @inbounds for j in 1:n
+        @inbounds @simd for i = 1:j
+            M[i,j] = v[k+i]
+            M[j,i] = v[k+i]
+        end
+        k += j
+    end
+    return M
+end
+# Xnom,ULnom,URnom = QYZ_to_XULR(Qnom,Ynom,ZLnom,ZRnom);
+function QYZ_to_XULR(Q::Array{Float64,3},Y::Array{Float64,3},ZL::Array{Float64,3},ZR::Array{Float64,3})
+    N = size(Q,3) - 1
+    ix = size(Q,1)
+    iu = size(Y,1)
+    iq = div(ix*(ix+1),2)
+    iy = ix*iu
+    q = Matrix{Float64}(undef,iq,N+1)
+    yl = Matrix{Float64}(undef,iy,N)
+    yr = Matrix{Float64}(undef,iy,N)
+    zl = Matrix{Float64}(undef,iq,N)
+    zr = Matrix{Float64}(undef,iq,N)
+    for i in 1:N
+        q[:,i] .= vec_upper(Q[:,:,i],ix)
+        yl[:,i] .= vec(Y[:,:,i])
+        yr[:,i] .= vec(Y[:,:,i+1])
+        zl[:,i] .= vec_upper(ZL[:,:,i],ix)
+        zr[:,i] .= vec_upper(ZR[:,:,i],ix)
+    end
+    q[:,N+1] .= vec_upper(Q[:,:,N+1],ix)
+    return q,vcat(yl,zl),vcat(yr,zr)
+end
+
+function XULR_to_QYZ(X::Matrix{Float64},UL::Matrix{Float64},UR::Matrix{Float64},ix::Int,iu::Int)
+    N = size(X,2) - 1
+    iq = size(X,1)
+    Q = Array{Float64}(undef,ix,ix,N+1)
+    Y = Array{Float64}(undef,iu,ix,N+1)
+    ZL = Array{Float64}(undef,ix,ix,N)
+    ZR = Array{Float64}(undef,ix,ix,N)
+    for i in 1:N+1
+        Q[:,:,i] .= mat_upper(X[:,i],ix) 
+        if i <= N
+    ZL[:,:,i] .= mat_upper(UL[ix*iu+1:ix*iu+iq,i],ix) 
+        ZR[:,:,i] .= mat_upper(UR[ix*iu+1:ix*iu+iq,i],ix) 
+        end
+    end
+    Y[:,:,1:N] .= reshape(UL[1:ix*iu,:],(iu,ix,N))
+    Y[:,:,N+1] .= reshape(UR[1:ix*iu,N],(iu,ix))
+    return Q,Y,ZL,ZR
+end
+
+function XU_to_QYZ(X::Matrix{Float64},U::Matrix{Float64},ix::Int,iu::Int)
+    N = size(X,2)
+    iq = size(X,1)
+    Q = Array{Float64}(undef,ix,ix,N)
+    Z = Array{Float64}(undef,ix,ix,N)
+    for i in 1:N
+        Q[:,:,i] .= mat_upper(X[:,i],ix) 
+        Z[:,:,i] .= mat_upper(U[ix*iu+1:ix*iu+iq,i],ix) 
+    end
+    Y = reshape(U[1:ix*iu,:],(iu,ix,N))
+    return Q,Y,Z
+end
+
+function QYZ_to_XU(Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3})
+    N = size(Q,3)
+    ix = size(Q,1)
+    iu = size(Y,1)
+    iq = div(ix*(ix+1),2)
+    q = Matrix{Float64}(undef,iq,N)
+    z = Matrix{Float64}(undef,iq,N)
+    for i in 1:N
+        q[:,i] .= vec_upper(Q[:,:,i],ix)
+        z[:,i] .= vec_upper(Z[:,:,i],ix)
+    end
+    y = reshape(Y,(iu*ix,N))
+    return q,vcat(y,z)
+end
+
+function QYZS_to_XU(Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3},S::Matrix{Float64})
+    N = size(Q,3)
+    ix = size(Q,1)
+    iu = size(K,1)
+    iq = div(ix*(ix+1),2)
+    q = Matrix{Float64}(undef,iq,N)
+    z = Matrix{Float64}(undef,iq,N)
+    for i in 1:N
+        q[:,i] .= vec_upper(Q[:,:,i],ix)
+        z[:,i] .= vec_upper(Z[:,:,i],ix)
+    end
+    y = reshape(Y,(iu*ix,N))
+    # z = reshape(Z,(ix*ix,N))
+    return q,vcat(y,z,S)
+end
+
 function get_radius_angle_Ellipse2D(Q_list)
     radius_list = []
     angle_list = []
@@ -29,41 +152,41 @@ end
 
 function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     x::Matrix,u::Matrix,T::Vector,
-    Q::Array{Float64,3},Y::Array{Float64,3},Z::Array{Float64,3},
+    X::Matrix,UL::Matrix,UR::Matrix;
     flag_single::Bool=false)
     N = size(x,2) - 1
     ix = model.ix
     iu = model.iu
-    iq = model.iq
-    iy = model.iy
+    iX = model.iX
+    iU = model.iU
 
     idx_x = 1:ix
-    idx_q = (ix+1):(ix+iq)
-
+    idx_X = (ix+1):(ix+iX)
     function dvdt(out,V,p,t)
         um = p[1]
         up = p[2]
-        ym = p[3]
-        yp = p[4]
-        zm = p[5]
-        zp = p[6]
-        dt = p[7]
+        Um = p[3]
+        Up = p[4]
+        dt = p[5]
 
         alpha = (dt - t) / dt
         beta = t / dt
 
         u_ = alpha * um + beta * up
-        y_ = alpha * ym + beta * yp
-        z_ = alpha * zm + beta * zp
+        U_ = alpha * Um + beta * Up
 
         x_ = V[idx_x]
-        q_ = V[idx_q]
+        X_ = V[idx_X]
 
         # traj terms
         f = forward(dynamics,x_,u_)
-        A,B = diff(dynamics,x_,u_)
+        fx,fu = diff(dynamics,x_,u_)
+
         # funl terms
-        F = forward(model,q_,y_,z_,A,B)
+        if type_funnel_dynamics == "Basic"
+            F = forward(model,X_,U_)
+        # elseif type_funnel_dynamics == "Lyapunov"
+        end
 
         dxdt = f
         dqdt = F
@@ -74,82 +197,48 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
     tprop = []
     xprop = []
     uprop = []
-    qprop = []
-    yprop = []
-    zprop = []
-    Qfwd = zeros(size(Q))
-    Qfwd[:,:,1] .= Q[:,:,1]
+    Xprop = []
+    Uprop = []
+    Xfwd = zeros(size(X))
+    Xfwd[:,1] .= X[:,1]
     for i = 1:N
         if flag_single == true
-            V0 = [x[:,i];vec(Qfwd[:,:,i])][:]
+            V0 = [x[:,i];Xfwd[:,i]][:]
         else
-            V0 = [x[:,i];vec(Q[:,:,i])][:]
+            V0 = [x[:,i];X[:,i]][:]
         end
 
         um = u[:,i]
         up = u[:,i+1]
-        ym = vec(Y[:,:,i])
-        yp = vec(Y[:,:,i+1])
-        zm = vec(Z[1:ix,:,i])
-        if typeof(model) == LinearFOH
-            zp = vec(Z[:,:,i])
-        elseif typeof(model) == LinearSOH
-            zp = vec(Z[ix+1:2*ix,:,i])
-        else
-            zp = vec(Z[:,:,i+1])
-        end
+        Um = UL[:,i]
+        Up = UR[:,i]
         dt = T[i]
 
-        prob = ODEProblem(dvdt,V0,(0,dt),(um,up,ym,yp,zm,zp,dt))
+        prob = ODEProblem(dvdt,V0,(0,dt),(um,up,Um,Up,dt))
         sol = solve(prob, Tsit5(), reltol=1e-9, abstol=1e-9;verbose=false);
 
-        tode = sol.t[1:end-1]
+        ode = stack(sol.u)
+        tode = sol.t
+        xode = ode[idx_x, :]
+        Xode = ode[idx_X, :]
+
         uode = zeros(iu,size(tode,1))
-        yode = zeros(iy,size(tode,1))
-        zode = zeros(iq,size(tode,1))
+        Uode = zeros(iU,size(tode,1))
         for idx in 1:length(tode)
             alpha = (dt - tode[idx]) / dt
             beta = tode[idx] / dt
             uode[:,idx] .= alpha * um + beta * up
-            yode[:,idx] .= alpha * ym + beta * yp
-            zode[:,idx] .= alpha * zm + beta * zp
+            Uode[:,idx] .= alpha * Um + beta * Up
         end
-        ode = stack(sol.u)
-        xode = ode[idx_x,1:end-1]
-        qode = ode[idx_q,1:end-1]
-        if i == 1
-            tprop = tode
-            xprop = xode
-            uprop = uode
-            qprop = qode
-            yprop = yode
-            zprop = zode
-        else 
-            tprop = vcat(tprop,sum(T[1:i-1]).+tode)
-            xprop = hcat(xprop,xode)
-            uprop = hcat(uprop,uode)
-            qprop = hcat(qprop,qode)
-            yprop = hcat(yprop,yode)
-            zprop = hcat(zprop,zode)
-        end
-        Qfwd[:,:,i+1] = reshape(qode[:,end],(ix,ix))
-    end
-    tprop = vcat(tprop,[sum(T[1:N])])
-    xprop = hcat(xprop,x[:,end])
-    uprop = hcat(uprop,u[:,end])
-    qprop = hcat(qprop,vec(Q[:,:,end]))
-    yprop = hcat(yprop,vec(Y[:,:,end]))
-    zprop = hcat(zprop,vec(Z[:,:,end]))
 
-    Qprop = zeros(ix,ix,length(tprop))
-    Yprop = zeros(iu,Int64(iy/iu),length(tprop))
-    Zprop = zeros(ix,ix,length(tprop))
-    for i in 1:length(tprop)
-        Qprop[:,:,i] .= reshape(qprop[:,i],(ix,ix))
-        Yprop[:,:,i] .= reshape(yprop[:,i],(iu,Int64(iy/iu)))
-        Zprop[:,:,i] .= reshape(zprop[:,i],(ix,ix))
+        tprop = i == 1 ? tode : vcat(tprop, sum(T[1:i-1]) .+ tode)
+        xprop = i == 1 ? xode : hcat(xprop, xode)
+        uprop = i == 1 ? uode : hcat(uprop, uode)
+        Xprop = i == 1 ? Xode : hcat(Xprop, Xode)
+        Uprop = i == 1 ? Uode : hcat(Uprop, Uode)
+        Xfwd[:,i+1] = ode[idx_X,end]
     end
-    return Qfwd,tprop,xprop,uprop,Qprop,Yprop,Zprop
+    return Xfwd,tprop,xprop,uprop,Xprop,Uprop
 end
 
 function propagate_from_funnel_entry(x0::Vector,model::FunnelDynamics,dynamics::Dynamics,

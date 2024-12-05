@@ -20,24 +20,24 @@ struct InputConstraint <: FunnelConstraint
     end
 end
 
-function impose!(constraint::StateConstraint,model::Model,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector)
+function impose(constraint::StateConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
     a = constraint.a
     b = constraint.b
 
     LMI = [(b-a'*xnom)*(b-a'*xnom) a'*Q;
         Q*a Q
     ]
-    @constraint(model, 0 <= LMI, PSDCone())
+    return LMI
 end
 
-function impose!(constraint::InputConstraint,model::Model,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector)
+function impose(constraint::InputConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
     a = constraint.a
     b = constraint.b
 
     LMI = [(b-a'*unom)*(b-a'*unom) a'*Y;
         Y'*a Q
     ]
-    @constraint(model, 0 <= LMI, PSDCone())
+    return LMI
 end
 
 struct ObstacleAvoidance <: FunnelConstraint
@@ -48,7 +48,7 @@ struct ObstacleAvoidance <: FunnelConstraint
     end
 end
 
-function impose!(constraint::ObstacleAvoidance,model::Model,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector)
+function impose(constraint::ObstacleAvoidance,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
     H = constraint.H
     c = constraint.c
     M = [1 0 0;0 1 0]
@@ -59,5 +59,20 @@ function impose!(constraint::ObstacleAvoidance,model::Model,Q::Matrix,Y::Matrix,
     LMI = [(b-a'*xnom)*(b-a'*xnom) a'*Q;
         Q*a Q
     ]
-    @constraint(model, 0 <= LMI, PSDCone())
+    return LMI
 end
+
+# struct WayPoint <: FunnelConstraint
+#     Qpos_max::Matrix{Float64}
+#     function WayPoint(Qmax::Matrix)
+#         new(Qmax)
+#     end
+# end
+
+# function impose!(constraint::WayPoint,model::Model,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector,idx::Int)
+#     # hard coding
+#     # 1,4,7,10,13,16
+#     if (idx == 4) || (idx == 7) || (idx == 10) || (idx == 13)
+#         @constraint(model, Q[1:3,1:3] <= constraint.Qpos_max, PSDCone())
+#     end
+# end
