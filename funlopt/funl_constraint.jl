@@ -20,7 +20,7 @@ struct InputConstraint <: FunnelConstraint
     end
 end
 
-function impose(constraint::StateConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
+function impose(constraint::StateConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int=-1)
     a = constraint.a
     b = constraint.b
 
@@ -30,7 +30,7 @@ function impose(constraint::StateConstraint,Q::Matrix,Y::Matrix,xnom::Vector,uno
     return LMI
 end
 
-function impose(constraint::InputConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
+function impose(constraint::InputConstraint,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int=-1)
     a = constraint.a
     b = constraint.b
 
@@ -48,7 +48,7 @@ struct ObstacleAvoidance <: FunnelConstraint
     end
 end
 
-function impose(constraint::ObstacleAvoidance,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int)
+function impose(constraint::ObstacleAvoidance,Q::Matrix,Y::Matrix,xnom::Vector,unom::Vector;idx::Int=-1)
     H = constraint.H
     c = constraint.c
     M = [1 0 0;0 1 0]

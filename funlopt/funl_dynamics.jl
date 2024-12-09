@@ -1,8 +1,9 @@
 include("../trajopt/dynamics.jl")
-include("../trajopt/discretize.jl")
+# include("../trajopt/discretize.jl")
 using LinearAlgebra
 using BlockDiagonals
 using SparseArrays
+using DifferentialEquations
 
 abstract type FunnelDynamics end
 
@@ -274,7 +275,15 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
         Up = UR[:,i]
         dt = T[i]
 
-        t, sol = RK4(dvdt,V0,(0,dt),(um,up,Um,Up,dt),50)
+        # t, sol = RK4(dvdt,V0,(0,dt),(um,up,Um,Up,dt),50)
+
+        # Set up the problem
+        prob = ODEProblem(dvdt, V0, (0,dt),(um,up,Um,Up,dt))
+
+        # Solve using RK4 with fixed step size
+        sol = solve(prob, RK4(), dt=dt/50, saveat=[0.0,dt])
+        print_jl(sol)
+
         x_prop[:,i] .= sol[idx_x,end]
         X_prop[:,i] .= sol[idx_X,end]
         A[:,:,i] .= reshape(sol[idx_A,end],iX,iX)
@@ -283,6 +292,191 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
         z[:,i] .= X_prop[:,i] - A[:,:,i]*X[:,i] - Bm[:,:,i]*Um - Bp[:,:,i]*Up 
     end
     return A,Bm,Bp,s,z,x_prop,X_prop
+end
+
+function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
+        x::Matrix,u::Matrix,T::Vector,X::Matrix,UL::Matrix,UR::Matrix)
+    @assert size(x,2) == size(X,2)
+    @assert size(x,2) + 1 == size(u,2)
+    @assert size(X,2) == size(UL,2)
+    @assert size(X,2) == size(UR,2)
+    @assert size(UL,1) == size(UR,1)
+
+    N = size(x,2)
+    ix = model.ix
+    iX = size(X,1)
+    iU = size(UL,1)
+
+    idx_x = get_interval(1,ix)
+    idx_X = get_interval(idx_x[end]+1,iX)
+    idx_A = get_interval(idx_X[end]+1,iX*iX)
+    idx_Bm = get_interval(idx_A[end]+1,iX*iU)
+    idx_Bp = get_interval(idx_Bm[end]+1,iX*iU)
+    function dvdt(out,V,p,t)
+        um = p[1]
+        up = p[2]
+        Um = p[3]
+        Up = p[4]
+        dt = p[5]
+
+        alpha = (dt - t) / dt
+        beta = t / dt
+
+        u_ = alpha * um + beta * up
+        U_ = alpha * Um + beta * Up
+
+        x_ = V[idx_x]
+        X_ = V[idx_X]
+        Phi = reshape(V[idx_A], (iX,iX))
+        Bm_ = reshape(V[idx_Bm],(iX,iU))
+        Bp_ = reshape(V[idx_Bp],(iX,iU))
+
+        # traj terms
+        f = forward(dynamics,x_,u_)
+        fx,fu = diff(dynamics,x_,u_)
+
+        # funl terms
+        # TODO: we need a if statement here
+        F = forward(model,X_,U_)
+        FX_,FU_ = diff(model,X_,U_)
+
+        dA = FX_*Phi
+        dBm = FX_*Bm_ + FU_*alpha
+        dBp = FX_*Bp_ + FU_*beta
+        dV = [f;F;dA[:];dBm[:];dBp[:]]
+        out .= dV[:]
+    end
+
+    A = zeros(iX,iX,N)
+    Bm = zeros(iX,iU,N)
+    Bp = zeros(iX,iU,N)
+    s = zeros(iX,N)
+    z = zeros(iX,N)
+    x_prop = zeros(ix,N)
+    X_prop = zeros(iX,N)
+    for i = 1:N
+        A0 = Matrix{Float64}(I,iX,iX)
+        Bm0 = zeros(iX,iU)
+        Bp0 = zeros(iX,iU)
+        V0 = [x[:,i];X[:,i];A0[:];Bm0[:];Bp0[:]][:]
+
+        um = u[:,i]
+        up = u[:,i+1]
+        Um = UL[:,i]
+        Up = UR[:,i]
+        dt = T[i]
+
+        # t, sol = RK4(dvdt,V0,(0,dt),(um,up,Um,Up,dt),50)
+
+        # Set up the problem
+        prob = ODEProblem(dvdt, V0, (0,dt),(um,up,Um,Up,dt))
+
+        # Solve using RK4 with fixed step size
+        sol = solve(prob, RK4(), dt=dt/50, saveat=[0.0,dt])
+
+        x_prop[:,i] .= sol[idx_x,end]
+        X_prop[:,i] .= sol[idx_X,end]
+        A[:,:,i] .= reshape(sol[idx_A,end],iX,iX)
+        Bm[:,:,i] .= reshape(sol[idx_Bm,end],iX,iU)
+        Bp[:,:,i] .= reshape(sol[idx_Bp,end],iX,iU)
+        z[:,i] .= X_prop[:,i] - A[:,:,i]*X[:,i] - Bm[:,:,i]*Um - Bp[:,:,i]*Up 
+    end
+    return A,Bm,Bp,s,z,x_prop,X_prop
+end
+
+function discretize_foh_with_Nsub(Nsub::Int64,model::FunnelDynamics,dynamics::Dynamics,
+        x::Matrix,u::Matrix,T::Vector,X::Matrix,UL::Matrix,UR::Matrix)
+    @assert Nsub > 1
+    @assert size(x,2) == size(X,2)
+    @assert size(x,2) + 1 == size(u,2)
+    @assert size(X,2) == size(UL,2)
+    @assert size(X,2) == size(UR,2)
+    @assert size(UL,1) == size(UR,1)
+
+    N = size(x,2)
+    ix = model.ix
+    iX = size(X,1)
+    iU = size(UL,1)
+
+    idx_x = get_interval(1,ix)
+    idx_X = get_interval(idx_x[end]+1,iX)
+    idx_A = get_interval(idx_X[end]+1,iX*iX)
+    idx_Bm = get_interval(idx_A[end]+1,iX*iU)
+    idx_Bp = get_interval(idx_Bm[end]+1,iX*iU)
+    function dvdt(out,V,p,t)
+        um = p[1]
+        up = p[2]
+        Um = p[3]
+        Up = p[4]
+        dt = p[5]
+
+        alpha = (dt - t) / dt
+        beta = t / dt
+
+        u_ = alpha * um + beta * up
+        U_ = alpha * Um + beta * Up
+
+        x_ = V[idx_x]
+        X_ = V[idx_X]
+        Phi = reshape(V[idx_A], (iX,iX))
+        Bm_ = reshape(V[idx_Bm],(iX,iU))
+        Bp_ = reshape(V[idx_Bp],(iX,iU))
+
+        # traj terms
+        f = forward(dynamics,x_,u_)
+        fx,fu = diff(dynamics,x_,u_)
+
+        # funl terms
+        # TODO: we need a if statement here
+        F = forward(model,X_,U_)
+        FX_,FU_ = diff(model,X_,U_)
+
+        dA = FX_*Phi
+        dBm = FX_*Bm_ + FU_*alpha
+        dBp = FX_*Bp_ + FU_*beta
+        dV = [f;F;dA[:];dBm[:];dBp[:]]
+        out .= dV[:]
+    end
+
+    A = zeros(iX,iX,N,Nsub-1)
+    Bm = zeros(iX,iU,N,Nsub-1)
+    Bp = zeros(iX,iU,N,Nsub-1)
+    s = zeros(iX,N,Nsub-1)
+    z = zeros(iX,N,Nsub-1)
+    x_prop = zeros(ix,N,Nsub-1)
+    # X_prop = zeros(iX,N)
+    for i = 1:N
+        A0 = Matrix{Float64}(I,iX,iX)
+        Bm0 = zeros(iX,iU)
+        Bp0 = zeros(iX,iU)
+        V0 = [x[:,i];X[:,i];A0[:];Bm0[:];Bp0[:]][:]
+
+        um = u[:,i]
+        up = u[:,i+1]
+        Um = UL[:,i]
+        Up = UR[:,i]
+        dt = T[i]
+
+        # t, sol = RK4(dvdt,V0,(0,dt),(um,up,Um,Up,dt),50)
+
+        # Set up the problem
+        prob = ODEProblem(dvdt, V0, (0,dt),(um,up,Um,Up,dt))
+
+        # Solve using RK4 with fixed step size
+        saveat = range(0.0, stop=dt, length=Nsub+1)[2:end-1]
+        sol = solve(prob, RK4(), dt=dt/50, saveat=saveat)
+        @assert size(sol,2) == Nsub-1
+
+        for j in 1:Nsub-1
+            x_prop[:,i,j] = sol[idx_x,j]
+            X_prop = sol[idx_X,j]
+            A[:,:,i,j] .= reshape(sol[idx_A,j],iX,iX)
+            Bm[:,:,i,j] .= reshape(sol[idx_Bm,j],iX,iU)
+            Bp[:,:,i,j] .= reshape(sol[idx_Bp,j],iX,iU)
+            z[:,i,j] .= X_prop - A[:,:,i,j]*X[:,i] - Bm[:,:,i,j]*Um - Bp[:,:,i,j]*Up 
+        end
+    end
+    return A,Bm,Bp,s,z,x_prop
 end
 
 # function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,

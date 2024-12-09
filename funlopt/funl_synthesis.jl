@@ -39,6 +39,12 @@ mutable struct FunnelSolution
     uprop::Any
     Xprop::Any
     Uprop::Any
+
+    A_sub::Array{Float64,4}
+    Bm_sub::Array{Float64,4}
+    Bp_sub::Array{Float64,4}
+    rem_sub::Array{Float64,3}
+    x_sub::Array{Float64,3}
     # ctcs_fwd::Any
 
 
@@ -87,6 +93,7 @@ struct FunnelSynthesis
     solution::FunnelSolution
 
     N::Int64  # number of subintervals (number of node - 1)
+    Nsub::Int64 # number of subsubintervals for ctcs
     w_funl::Float64  # weight for funnel cost
     w_vc::Float64  # weight for virtual control
     w_tr::Float64  # weight for trust-region
@@ -98,29 +105,26 @@ struct FunnelSynthesis
 
     # flag_type::String
     # funl_ctcs::Union{FunnelCTCS,Nothing}
-    function FunnelSynthesis(N::Int,max_iter::Int,
-        dynamics::Dynamics,funl_dynamics::FunnelDynamics,funl_constraint::Vector{T},scaling::Scaling,
-        w_funl::Float64,w_vc::Float64,w_tr::Float64,tol_tr::Float64,tol_vc::Float64,tol_dyn::Float64,
-        verbosity::Any) where T <: FunnelConstraint
+    function FunnelSynthesis(param::Dict,
+        dynamics::Dynamics,funl_dynamics::FunnelDynamics,funl_constraint::Vector{T},scaling::Scaling) where T <: FunnelConstraint
+        N = param["N"]
+        Nsub = param["Nsub"] # number of subsubintervals for ctcs
+        w_funl = param["w_funl"]  # weight for funnel cost
+        w_vc = param["w_vc"]  # weight for virtual control
+        w_tr = param["w_tr"]  # weight for trust-region
+        tol_tr = param["tol_tr"]  # tolerance for trust-region
+        tol_vc = param["tol_vc"]  # tolerance for virtual control
+        tol_dyn = param["tol_dyn"]  # tolerance for dynamics error
+        max_iter = param["max_iter"]  # maximum iteration
+        verbosity = param["verbosity"]
+
         ix = dynamics.ix
         iu = dynamics.iu
         ilam = DLMI.ilam
         solution = FunnelSolution(N,ix,iu,ilam)
 
-        # iq = funl_dynamics.iq
-        # iy = funl_dynamics.iy
-        # if typeof(funl_dynamics) == LinearSOH
-        #     iz = 2*ix
-        # else
-        #     iz = ix
-        # end
-        # if funl_ctcs === nothing
-        #     println(flag_type," funnel and CTCS is ignored")
-        # else
-        #     println(flag_type," funnel and CTCS is considered after first iteration")
-        # end
         new(dynamics,funl_dynamics,funl_constraint,scaling,solution,
-            N,w_funl,w_vc,w_tr,tol_tr,tol_vc,tol_dyn,max_iter,verbosity)
+            N,Nsub,w_funl,w_vc,w_tr,tol_tr,tol_vc,tol_dyn,max_iter,verbosity)
     end
 end
 
@@ -187,11 +191,15 @@ function boundary_final!(fs,model::Model,Qend)
     @constraint(model, Qend <= fs.solution.Qf, PSDCone())
 end
 
-# function funnel_dynamics!(fs,model::Model,Qi,Qip,Yi,Yip,Zi,Zip,i)
-#     @constraint(model, vec(Qip) == fs.solution.Aq[:,:,i]*vec(Qi) +
-#         fs.solution.Bym[:,:,i]*vec(Yi) + fs.solution.Byp[:,:,i]*vec(Yip) +
-#         fs.solution.Bzm[:,:,i]*vec(Zi) + fs.solution.Bzp[:,:,i]*vec(Zip))
-# end
+function funnel_dynamics!(fs,model::Model,Qi,Qj,ULi,URi,i)
+    @constraint(model, vec_upper(Qj,ix) == (
+        fs.solution.A[:,:,i]*vec_upper(Qi,ix) 
+        + fs.solution.Bm[:,:,i]*ULi
+        + fs.solution.Bp[:,:,i]*URi
+        + fs.solution.rem[:,i]
+        # + VC[:,i]
+    ))
+end
 
 # function ctcs_dynamics!(fs,model::Model,Qi,Yi,Yip,Zi,Zip,bi,bip,i)
 #     @constraint(model, 1e-7 .* fs.scaling.s_ctcs*ones(fs.funl_ctcs.is) >= fs.scaling.s_ctcs*(fs.solution.Sq[:,:,i]*vec(Qi) +
@@ -217,16 +225,17 @@ function invariance_condition(fs,Qi,Yi,Zi,xi,ui)
     return LMI
 end
 
-function state_input_constraints!(fs,model::Model,Qi,Yi,xnom,unom,idx)
+function state_input_constraints!(fs,model::Model,Qi,Yi,xnom,unom)
     N_constraint = size(fs.funl_constraint,1)
     for j in 1:N_constraint
         # TODO: do you think it is a good idea to use function overloading?
-        @constraint(model, impose(fs.funl_constraint[j],Qi,Yi,xnom,unom,idx=idx) >= 0, PSDCone())
+        @constraint(model, impose(fs.funl_constraint[j],Qi,Yi,xnom,unom) >= 0, PSDCone())
     end
 end
 
-function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,iteration::Int64)
+function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,dtnom::Vector,solver::String,iteration::Int64)
     N = fs.N
+    Nsub = fs.Nsub
     ix = fs.dynamics.ix
     iu = fs.dynamics.iu
     iq = fs.funl_dynamics.iq
@@ -281,12 +290,6 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     # # parameter
     # θ = fs.solution.θ
 
-    # Q is PD
-    very_small = 1e-6
-    for i in 1:N+1
-        @constraint(model, Sx*Qcvx[i]*Sx >= very_small .* Matrix(1.0I,ix,ix), PSDCone())
-    end
-
     # scale reference trajectory for trust region computation
     Qbar_scaled = zeros(ix,ix,N+1)
     Ybar_scaled = zeros(iu,ix,N+1)
@@ -315,6 +318,8 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     # boundary condition
     boundary_initial!(fs,model,Sx*Qcvx[1]*Sx)
     boundary_final!(fs,model,Sx*Qcvx[end]*Sx)
+
+    # constraints
     for i in 1:N+1
         Qi = Sx*Qcvx[i]*Sx
         Yi = Su*Ycvx[i]*Sx
@@ -332,17 +337,14 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
 
         # # Funnel dynamics
         if i <= N
-            # funnel_dynamics!(fs,model,Qi,Qip,Yi,Yip,ZLi,ZRi,i)
             ULi = vcat(vec(Yi),vec_upper(ZLi,ix))
             URi = vcat(vec(Yj),vec_upper(ZRi,ix))
-            @constraint(model, vec_upper(Qj,ix) == (
-                fs.solution.A[:,:,i]*vec_upper(Qi,ix) 
-                + fs.solution.Bm[:,:,i]*ULi
-                + fs.solution.Bp[:,:,i]*URi
-                + fs.solution.rem[:,i]
-                # + VC[:,i]
-            ))
+            funnel_dynamics!(fs,model,Qi,Qj,ULi,URi,i)
         end
+
+        # Q is PD
+        very_small = 1e-6
+        @constraint(model, Sx*Qcvx[i]*Sx >= very_small .* Matrix(1.0I,ix,ix), PSDCone())
 
         # Invariance condition
         if i <= N
@@ -354,7 +356,38 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
         end
 
         # constraints
-        state_input_constraints!(fs,model,Qi,Yi,xi,ui,i)
+        state_input_constraints!(fs,model,Qi,Yi,xi,ui)
+
+        # oversampling for ctcs
+        if i <= N && Nsub > 1 
+            tsub = range(0.0, stop = dtnom[i], length = Nsub+1)[2:end-1]
+            dt = dtnom[i]
+            for k in 1:Nsub-1 # We use 'k' instead of 'j' to avoid confusion with variables named "var" + "j" (e.g., Qj).
+                tk = tsub[k]
+                alpha = (dt - tk) / dt
+                beta = tk / dt
+                xk = fs.solution.x_sub[:,i,k]
+                uk = alpha * ui + beta * uj
+                Qk = mat_upper(fs.solution.A_sub[:,:,i,k]*vec_upper(Qi,ix) 
+                        + fs.solution.Bm_sub[:,:,i,k]*ULi
+                        + fs.solution.Bp_sub[:,:,i,k]*URi
+                        + fs.solution.rem_sub[:,i,k], ix)
+                Yk = alpha * Yi + beta * Yj
+                Zk = alpha * ZLi + beta * ZRi
+
+                # Q PD
+                if type_funnel_dynamics == "Lyapunov"
+                    @constraint(model, Qk >= very_small .* Matrix(1.0I,ix,ix), PSDCone())
+                end
+
+                # invariance
+                LMIk = invariance_condition(fs,Qk,Yk,Zk,xk,uk)
+                @constraint(model, LMIk >= 0, PSDCone())
+
+                # constraints
+                state_input_constraints!(fs,model,Qk,Yk,xk,uk)
+            end
+        end
     end
 
     # cost
@@ -392,6 +425,7 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
    
     @objective(model,Min,cost_all)
     optimize!(model)
+    time_solve = MOI.get(model, MOI.SolveTimeSec())
 
     for i in 1:N+1
         Q = Sx*value.(Qcvx[i]/2 + Qcvx[i]'/2)*Sx
@@ -409,12 +443,16 @@ function sdpopt!(fs::FunnelSynthesis,xnom::Matrix,unom::Matrix,solver::String,it
     end
     # fs.solution.b = value.(bcvx)
 
-    return value(cost_all),value(cost_funl),value(cost_vc),value(cost_tr)
+    return time_solve,value(cost_all),value(cost_funl),value(cost_vc),value(cost_tr)
 end
 
 function run(fs::FunnelSynthesis,
         X0::Matrix{Float64},UL0::Matrix{Float64},UR0::Matrix{Float64},
         Qi::Matrix,Qf::Matrix,xnom::Matrix,unom::Matrix,dtnom::Vector,solver::String,θ0=nothing)
+
+    N = fs.N
+    Nsub = fs.Nsub
+
     fs.solution.X .= X0
     fs.solution.UL .= UL0
     fs.solution.UR .= UR0
@@ -426,26 +464,39 @@ function run(fs::FunnelSynthesis,
     #     fs.solution.θ = θ0
     # end
 
+    time_dict = Dict()
     for iteration in 1:fs.max_iter
         # discretization & linearization
-        time_discretization = @elapsed begin
-        fs.solution.A,fs.solution.Bm,fs.solution.Bp,_,fs.solution.rem,_,_ = discretize_foh(fs.funl_dynamics,
-            fs.dynamics,xnom[:,1:N],unom,dtnom,fs.solution.X[:,1:N],fs.solution.UL,fs.solution.UR)
+        time_dict["time_discretization"] = @elapsed begin
+            (
+                fs.solution.A,fs.solution.Bm,fs.solution.Bp,_,fs.solution.rem,_,_
+            ) = discretize_foh(fs.funl_dynamics,
+                fs.dynamics,xnom[:,1:N],unom,dtnom,fs.solution.X[:,1:N],fs.solution.UL,fs.solution.UR)
+        end
+
+        time_dict["time_discretization_sub"] = @elapsed begin
+            if Nsub > 1
+                (
+                    fs.solution.A_sub,fs.solution.Bm_sub,fs.solution.Bp_sub,_,fs.solution.rem_sub,fs.solution.x_sub
+                ) = discretize_foh_with_Nsub(Nsub,fs.funl_dynamics,
+                    fs.dynamics,xnom[:,1:N],unom,dtnom,fs.solution.X[:,1:N],fs.solution.UL,fs.solution.UR)
+            end
         end
 
         # solve subproblem
-        time_cvxopt = @elapsed begin
-        c_all, c_funl, c_vc, c_tr = sdpopt!(fs,xnom,unom,solver,iteration)
+        time_dict["time_cvxopt"] = @elapsed begin
+            time_solve,c_all, c_funl, c_vc, c_tr = sdpopt!(fs,xnom,unom,dtnom,solver,iteration)
         end
+        time_dict["time_solve"] = time_solve
 
         # propagate
-        time_multiple_shooting = @elapsed begin
-        (
-            Xfwd,
-            fs.solution.tprop,fs.solution.xprop,fs.solution.uprop,
-            fs.solution.Xprop,fs.solution.Uprop
-        ) =  propagate_multiple_FOH(fs.funl_dynamics,fs.dynamics,
-            xnom,unom,dtnom,fs.solution.X,fs.solution.UL,fs.solution.UR,flag_single=false)
+        time_dict["time_multiple_shooting"] = @elapsed begin
+            (
+                Xfwd,
+                fs.solution.tprop,fs.solution.xprop,fs.solution.uprop,
+                fs.solution.Xprop,fs.solution.Uprop
+            ) =  propagate_multiple_FOH(fs.funl_dynamics,fs.dynamics,
+                xnom,unom,dtnom,fs.solution.X,fs.solution.UL,fs.solution.UR,flag_single=false)
         end
         dyn_error = maximum(norm.(eachcol(Xfwd - fs.solution.X), 2))
 
@@ -472,4 +523,5 @@ function run(fs::FunnelSynthesis,
             break
         end
     end
+    return time_dict
 end
