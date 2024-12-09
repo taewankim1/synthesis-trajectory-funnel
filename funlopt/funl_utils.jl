@@ -184,10 +184,7 @@ function propagate_multiple_FOH(model::FunnelDynamics,dynamics::Dynamics,
         fx,fu = diff(dynamics,x_,u_)
 
         # funl terms
-        if type_funnel_dynamics == "Basic"
-            F = forward(model,X_,U_)
-        # elseif type_funnel_dynamics == "Lyapunov"
-        end
+        F = forward(model,X_,U_,A=fx,B=fu)
 
         dxdt = f
         dqdt = F
@@ -288,10 +285,7 @@ function propagate_from_funnel_entry(x0::Vector,model::FunnelDynamics,dynamics::
         fx,fu = diff(dynamics,x_,u_)
 
         # funl terms
-        if type_funnel_dynamics == "Basic"
-            F = forward(model,Xnom_,Unom_)
-        # elseif type_funnel_dynamics == "Lyapunov"
-        end
+        F = forward(model,Xnom_,Unom_,A=fx,B=fu)
 
         dV = [f;fnom;F]
         out .= dV[:]

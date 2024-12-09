@@ -7,6 +7,7 @@ using DifferentialEquations
 
 abstract type FunnelDynamics end
 
+# commutation matrix
 function com_mat(m, n)
     A = reshape(1:m*n, n, m)  # Note the swapped dimensions for Julia
     v = reshape(A', :)
@@ -66,7 +67,7 @@ struct Basic_type <: FunnelDynamics
     end
 end
 
-function forward(model::Basic_type, X::Vector, U::Vector)
+function forward(model::Basic_type,X::Vector,U::Vector;A::Matrix=I,B::Matrix=I)
     ix = model.ix
 
     q_upper = X[1:model.iq]
@@ -84,7 +85,7 @@ function forward(model::Basic_type, X::Vector, U::Vector)
     return vec_upper(dQ,ix)
 end
 
-function diff(model::Basic_type,X::Vector,U::Vector)
+function diff(model::Basic_type,X::Vector,U::Vector;A::Matrix=I,B::Matrix=I)
     ix = model.ix
     iu = model.iu
     iX = length(X)
@@ -105,6 +106,114 @@ function diff(model::Basic_type,X::Vector,U::Vector)
     Imat = sparse(I(model.ix))
     Aq = sparse(zeros(model.iq,model.iq))
     By = sparse(zeros(model.iq,model.iy))
+    Bz = Matrix(1.0I,iq,iq)
+    return Aq,hcat(By,Bz)
+end
+
+struct Lyapunov_type <: FunnelDynamics
+    alpha::Float64 # decay rate
+    ix::Int
+    iu::Int
+
+    iq::Int
+    iy::Int
+    ilam::Int # slack variables
+
+    iX::Int
+    iU::Int
+
+    Cn::Matrix # commutation matrix
+    Cm::Matrix # commutation matrix
+
+    i_upper::Vector
+    mask_upper::SparseMatrixCSC
+    function Lyapunov_type(alpha,ix,iu,ilam)
+        Cn = com_mat(ix,ix)
+        Cm = com_mat(iu,ix)
+
+        iq = div((ix+1)*ix,2)
+        iy = iu*ix
+        iX = iq
+        iU = iy+iq+ilam
+        i_upper = get_index_for_upper(ix)
+
+        # Fill index map for mapping elements of q to elements of q_u
+        index_map = Dict()
+        k = 1
+        for j in 1:ix
+            for i in 1:j
+                index_map[(i, j)] = k
+                k += 1
+            end
+        end
+
+        # Create the derivative matrix
+        mask = zeros(ix^2, length(index_map))
+        for j in 1:ix
+            for i in 1:ix
+                # Use symmetry to find the index
+                idx = i <= j ? index_map[(i, j)] : index_map[(j, i)]
+                mask[(i-1)*ix + j, idx] = 1
+            end
+        end
+        new(alpha,ix,iu,iq,iy,ilam,iX,iU,Cn,Cm,i_upper,sparse(mask))
+    end
+end
+
+function forward(model::Lyapunov_type,X::Vector,U::Vector;A::Matrix=I,B::Matrix=I)
+    ix = model.ix
+
+    q_upper = X[1:model.iq]
+    y = U[1:model.iy]
+    z_upper = U[model.iy+1:model.iy+model.iq]
+    if (model.ilam != 0)
+        lam = U[model.iy+model.iq+1:model.iy+model.iq+model.ilam]
+    end
+
+    Q = mat_upper(q_upper,model.ix)
+    Y = reshape(y,(model.iu,model.ix))
+    Z = mat_upper(z_upper,model.ix)
+   
+    H = A*Q + B*Y + 0.5*model.alpha*Q
+    dQ = H + H' + Z
+    return vec_upper(dQ,ix)
+end
+
+function diff(model::Lyapunov_type,X::Vector,U::Vector;A::Matrix=I,B::Matrix=I)
+    ix = model.ix
+    iu = model.iu
+    iX = length(X)
+    iU = length(U)
+    iq = model.iq
+    # ilam = model.ilam
+
+    i_upper = model.i_upper
+    mask_upper = model.mask_upper
+
+    q_upper = X[1:model.iq]
+    y = U[1:model.iy]
+    z_upper = U[model.iy+1:model.iy+model.iq]
+
+    Q = mat_upper(q_upper,ix)
+    Y = reshape(y,(iu,ix))
+    Z = mat_upper(z_upper,ix)
+
+    Imat = sparse(I(model.ix))
+    Cn = sparse(model.Cn)
+    Cm = sparse(model.Cm)
+
+    # H = AQ + BY + alpha/2 * Q
+    # Qdot = H + H' + Z
+
+    right = A + 0.5 * model.alpha * Imat
+    kron_ = create_block_diagonal(right,ix)
+    Aq = (kron_ + Cn * kron_)[i_upper,:] * mask_upper
+
+    right = B
+    # kron_ = kron(Imat,right)
+    kron_ = create_block_diagonal(right,ix)
+    By = (kron_ + Cn * kron_)[i_upper,:]
+
     Bz = Matrix(1.0I,iq,iq)
     return Aq,hcat(By,Bz)
 end
@@ -182,7 +291,24 @@ end
 #     return Aq,Bq,Sq
 # end
 
-function diff_numeric(model::FunnelDynamics,x::Vector,u::Vector)
+# function diff_numeric(model::FunnelDynamics,x::Vector,u::Vector)
+#     ix = length(x)
+#     iu = length(u)
+#     eps_x = Diagonal{Float64}(I, ix)
+#     eps_u = Diagonal{Float64}(I, iu)
+#     fx = zeros(ix,ix)
+#     fu = zeros(ix,iu)
+#     h = 2^(-18)
+#     for i in 1:ix
+#         fx[:,i] = (forward(model,x+h*eps_x[:,i],u) - forward(model,x-h*eps_x[:,i],u)) / (2*h)
+#     end
+#     for i in 1:iu
+#         fu[:,i] = (forward(model,x,u+h*eps_u[:,i]) - forward(model,x,u-h*eps_u[:,i])) / (2*h)
+#     end
+#     return fx,fu
+# end
+
+function diff_numeric(model::FunnelDynamics,x::Vector,u::Vector;A::Matrix=I,B::Matrix=I)
     ix = length(x)
     iu = length(u)
     eps_x = Diagonal{Float64}(I, ix)
@@ -191,10 +317,10 @@ function diff_numeric(model::FunnelDynamics,x::Vector,u::Vector)
     fu = zeros(ix,iu)
     h = 2^(-18)
     for i in 1:ix
-        fx[:,i] = (forward(model,x+h*eps_x[:,i],u) - forward(model,x-h*eps_x[:,i],u)) / (2*h)
+        fx[:,i] = (forward(model,x+h*eps_x[:,i],u,A=A,B=B) - forward(model,x-h*eps_x[:,i],u,A=A,B=B)) / (2*h)
     end
     for i in 1:iu
-        fu[:,i] = (forward(model,x,u+h*eps_u[:,i]) - forward(model,x,u-h*eps_u[:,i])) / (2*h)
+        fu[:,i] = (forward(model,x,u+h*eps_u[:,i],A=A,B=B) - forward(model,x,u-h*eps_u[:,i],A=A,B=B)) / (2*h)
     end
     return fx,fu
 end
@@ -247,7 +373,7 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
         # funl terms
         # TODO: we need a if statement here
         F = forward(model,X_,U_)
-        FX_,FU_ = diff(model,X_,U_)
+        FX_,FU_ = diff(model,X_,U_,fx,fu)
 
         dA = FX_*Phi
         dBm = FX_*Bm_ + FU_*alpha
@@ -337,8 +463,8 @@ function discretize_foh(model::FunnelDynamics,dynamics::Dynamics,
 
         # funl terms
         # TODO: we need a if statement here
-        F = forward(model,X_,U_)
-        FX_,FU_ = diff(model,X_,U_)
+        F = forward(model,X_,U_,A=fx,B=fu)
+        FX_,FU_ = diff(model,X_,U_,A=fx,B=fu)
 
         dA = FX_*Phi
         dBm = FX_*Bm_ + FU_*alpha
@@ -428,8 +554,8 @@ function discretize_foh_with_Nsub(Nsub::Int64,model::FunnelDynamics,dynamics::Dy
 
         # funl terms
         # TODO: we need a if statement here
-        F = forward(model,X_,U_)
-        FX_,FU_ = diff(model,X_,U_)
+        F = forward(model,X_,U_,A=fx,B=fu)
+        FX_,FU_ = diff(model,X_,U_,A=fx,B=fu)
 
         dA = FX_*Phi
         dBm = FX_*Bm_ + FU_*alpha
